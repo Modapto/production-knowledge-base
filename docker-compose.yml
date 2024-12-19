@@ -55,6 +55,7 @@ services:
       - 9200:9200
       - 9300:9300
     environment:
+      xpack.security.enabled: true
       node.name: elasticsearch
       ES_JAVA_OPTS: -Xms512m -Xmx512m
       # Bootstrap password.
