@@ -2,7 +2,6 @@
 
 [![Elastic Stack version](https://img.shields.io/badge/Elastic%20Stack-8.15.1-00bfb3?style=flat&logo=elastic-stack)](https://www.elastic.co/blog/category/releases)
 [![Build Status](https://github.com/deviantony/docker-elk/workflows/CI/badge.svg?branch=main)](https://github.com/deviantony/docker-elk/actions?query=workflow%3ACI+branch%3Amain)
-[![Join the chat](https://badges.gitter.im/Join%20Chat.svg)](https://app.gitter.im/#/room/#deviantony_docker-elk:gitter.im)
 
 Run with Docker and Docker Compose.
 
@@ -22,14 +21,13 @@ Other available stack variants:
 * [`searchguard`](https://github.com/deviantony/docker-elk/tree/searchguard): Search Guard support
 
 ---
-##Setup the PKB 
+# Setup the PKB 
 
 ## tl;dr
 
 ```sh
 docker-compose --profile=setup up setup
 ```
-#then 
 
 ```sh
 docker-compose up
@@ -64,6 +62,89 @@ browser and use the following (default) credentials to log in:
 
 * user: elastic
 * password: -AwgIfDWbt_Mb+Z=_+Ck
+
+---
+
+## Evaluation Scenario
+
+* User instantiates the PKB and logs in to [Kibana](http:localhost:5601) using the credentials above.
+
+* The user navigates the main menu and redirects to the **Search** menu item. Then selects **Indices** and on the bottom of the screen they can see the available indices of the PKB. 
+
+* The users selects **Create a new index** , and creates an index with the name **orders_test**
+
+-The user populates the index with some test data by either the Kibana UI, or through the terminal:
+### Kibana UI:
+*Click on console on the bottom of the screen. 
+*In the environment, please type the following and click the play button (on the right of the POST request) to sent the following request: 
+```sh
+POST /orders_test/_doc
+{
+    "comments": "",
+    "orderof": [
+        {
+            "type": "Kit Holder",
+            "quantity": 1,
+            "pn": "KH001",
+            "expectedDeliveryDate": "2025-01-19"
+        }
+    ],
+  "composedby": [
+        {
+            "type": "Frame",
+            "quantity": 1,
+            "pn": "FR001",
+            "expectedDeliveryDate": "2025-01-19"
+        },
+        {
+            "type": "Block",
+            "quantity": 1,
+            "pn": "BK001",
+            "expectedDeliveryDate": "2025-01-19"
+        }
+    ],
+    "customer": "TEST",
+    "documentNumber": "00000000001"
+}
+
+```
+
+* A message indicating the index and the status is shown in the right part of the screen. 
+
+### Through the command line:
+* Run:
+```sh
+curl -u elastic -X POST "http://localhost:9200/orders_test/_doc" \
+-H "Content-Type: application/json" \
+-d '{
+    "comments": "",
+    "orderof": [
+        {
+            "type": "Kit Holder",
+            "quantity": 1,
+            "pn": "KH001",
+            "expectedDeliveryDate": "2025-01-19"
+        }
+    ],
+    "composedby": [
+        {
+            "type": "Frame",
+            "quantity": 1,
+            "pn": "FR001",
+            "expectedDeliveryDate": "2025-01-19"
+        },
+        {
+            "type": "Block",
+            "quantity": 1,
+            "pn": "BK001",
+            "expectedDeliveryDate": "2025-01-19"
+        }
+    ],
+    "customer": "TEST",
+    "documentNumber": "00000000001"
+}'
+```
+* Check the index contents on Kibana. Navigate to the Documents of the orders_test index and verify that the amount of the documents you registered are present within the index. 
 
 ## Deployed PKB on ATC cloud
 
