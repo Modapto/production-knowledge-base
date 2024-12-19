@@ -144,7 +144,7 @@ curl -u elastic -X POST "http://localhost:9200/orders_test/_doc" \
     "documentNumber": "00000000001"
 }'
 ```
-* Check the index contents on Kibana. Navigate to the Documents of the orders_test index and verify that the amount of the documents you registered are present within the index. 
+* Check the index contents on Kibana. Navigate to the **Documents** of the orders_test and verify that the amount of the documents you registered are present within the index. 
 
 ## Deployed PKB on ATC cloud
 
