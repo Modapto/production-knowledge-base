@@ -22,12 +22,14 @@ Other available stack variants:
 * [`searchguard`](https://github.com/deviantony/docker-elk/tree/searchguard): Search Guard support
 
 ---
+##Setup the PKB 
 
 ## tl;dr
 
 ```sh
 docker-compose --profile=setup up setup
 ```
+#then 
 
 ```sh
 docker-compose up
@@ -40,7 +42,7 @@ docker-compose up
 
 * [Docker Engine][docker-install] version **18.06.0** or newer
 * [Docker Compose][compose-install] version **1.28.0** or newer (including [Compose V2][compose-v2])
-* 1.5 GB of RAM
+* 2 GB of RAM
 
 > [!NOTE]
 > Especially on Linux, make sure your user has the [required permissions][linux-postinstall] to interact with the Docker
@@ -48,40 +50,22 @@ docker-compose up
 
 By default, the stack exposes the following ports:
 
-* 5044: Logstash Beats input
-* 50000: Logstash TCP input
 * 9600: Logstash monitoring API
 * 9200: Elasticsearch HTTP
 * 9300: Elasticsearch TCP transport
 * 5601: Kibana
-
-> [!WARNING]
-> Elasticsearch's [bootstrap checks][bootstrap-checks] were purposely disabled to facilitate the setup of the Elastic
-> stack in development environments. For production setups, we recommend users to set up their host according to the
-> instructions from the Elasticsearch documentation: [Important System Configuration][es-sys-config].
-
-### Docker Desktop
-
-#### Windows
-
-If you are using the legacy Hyper-V mode of _Docker Desktop for Windows_, ensure [File Sharing][win-filesharing] is
-enabled for the `C:` drive.
-
-#### macOS
-
-The default configuration of _Docker Desktop for Mac_ allows mounting files from `/Users/`, `/Volume/`, `/private/`,
-`/tmp` and `/var/folders` exclusively. Make sure the repository is cloned in one of those locations or follow the
-instructions from the [documentation][mac-filesharing] to add more locations.
+* 5044: Logstash Beats input
+* 50000: Logstash TCP input
 
 ## Usage
-
-> [!WARNING]
-> You must rebuild the stack images with `docker-compose build` whenever you switch branch or update the
-> [version](#version-selection) of an already existing stack.
 
 Give Kibana about a minute to initialize, then access the Kibana web UI by opening <http://localhost:5601> in a web
 browser and use the following (default) credentials to log in:
 
 * user: elastic
 * password: -AwgIfDWbt_Mb+Z=_+Ck
+
+## Deployed PKB on ATC cloud
+
+Since the latest version is deployed on the cloud you can access <https://kibana.modapto.atc.gr/app/security/dashboards> in a web browser and use the credentials above to log in.
   
