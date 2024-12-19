@@ -73,10 +73,10 @@ browser and use the following (default) credentials to log in:
 
 * The users selects **Create a new index** , and creates an index with the name **orders_test**
 
--The user populates the index with some test data by either the Kibana UI, or through the terminal:
+* The user populates the index with some test data by either the Kibana UI, or through the terminal:
 ### Kibana UI:
-*Click on console on the bottom of the screen. 
-*In the environment, please type the following and click the play button (on the right of the POST request) to sent the following request: 
+* Click on console on the bottom of the screen. 
+* In the environment, please type the following and click the play button (on the right of the POST request) to sent the following request: 
 ```sh
 POST /orders_test/_doc
 {
@@ -112,7 +112,7 @@ POST /orders_test/_doc
 * A message indicating the index and the status is shown in the right part of the screen. 
 
 ### Through the command line:
-* Run:
+Run:
 ```sh
 curl -u elastic -X POST "http://localhost:9200/orders_test/_doc" \
 -H "Content-Type: application/json" \
