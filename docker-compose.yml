@@ -43,7 +43,6 @@ services:
       - elasticsearch
 
   elasticsearch:
-    image: stellamarkop/pkb:elasticsearch
     build:
       context: elasticsearch/
       args:
@@ -55,7 +54,6 @@ services:
       - 9200:9200
       - 9300:9300
     environment:
-      xpack.security.enabled: true
       node.name: elasticsearch
       ES_JAVA_OPTS: -Xms512m -Xmx512m
       # Bootstrap password.
@@ -70,7 +68,6 @@ services:
     restart: unless-stopped
 
   logstash:
-    image: stellamarkop/pkb:logstash
     build:
       context: logstash/
       args:
@@ -93,7 +90,6 @@ services:
     restart: unless-stopped
 
   kibana:
-    image: stellamarkop/pkb:kibana
     build:
       context: kibana/
       args:
