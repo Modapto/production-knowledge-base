@@ -26,7 +26,7 @@ Other available stack variants:
 ## tl;dr
 
 ```sh
-docker-compose --profile=setup up setup
+docker-compose up setup
 ```
 
 ```sh
@@ -58,10 +58,7 @@ By default, the stack exposes the following ports:
 ## Usage
 
 Give Kibana about a minute to initialize, then access the Kibana web UI by opening <http://localhost:5601> in a web
-browser and use the following (default) credentials to log in:
-
-* user: elastic
-* password: -AwgIfDWbt_Mb+Z=_+Ck
+browser.
 
 ---
 
