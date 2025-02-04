@@ -62,88 +62,17 @@ browser.
 
 ---
 
-## Evaluation Scenario
-
-* User instantiates the PKB and logs in to [Kibana](http:localhost:5601) using the credentials above.
-
-* The user navigates the main menu and redirects to the **Search** menu item. Then selects **Indices** and on the bottom of the screen they can see the available indices of the PKB. 
-
-* The users selects **Create a new index** , and creates an index with the name **orders_test**
-
-* The user populates the index with some test data by either the Kibana UI, or through the terminal:
-### Kibana UI:
-* Click on console on the bottom of the screen. 
-* In the environment, please type the following and click the play button (on the right of the POST request) to sent the following request: 
-```sh
-POST /orders_test/_doc
-{
-    "comments": "",
-    "orderof": [
-        {
-            "type": "Kit Holder",
-            "quantity": 1,
-            "pn": "KH001",
-            "expectedDeliveryDate": "2025-01-19"
-        }
-    ],
-  "composedby": [
-        {
-            "type": "Frame",
-            "quantity": 1,
-            "pn": "FR001",
-            "expectedDeliveryDate": "2025-01-19"
-        },
-        {
-            "type": "Block",
-            "quantity": 1,
-            "pn": "BK001",
-            "expectedDeliveryDate": "2025-01-19"
-        }
-    ],
-    "customer": "TEST",
-    "documentNumber": "00000000001"
-}
-
-```
-
-* A message indicating the index and the status is shown in the right part of the screen. 
-
-### Through the command line:
-Run:
-```sh
-curl -u elastic -X POST "http://localhost:9200/orders_test/_doc" \
--H "Content-Type: application/json" \
--d '{
-    "comments": "",
-    "orderof": [
-        {
-            "type": "Kit Holder",
-            "quantity": 1,
-            "pn": "KH001",
-            "expectedDeliveryDate": "2025-01-19"
-        }
-    ],
-    "composedby": [
-        {
-            "type": "Frame",
-            "quantity": 1,
-            "pn": "FR001",
-            "expectedDeliveryDate": "2025-01-19"
-        },
-        {
-            "type": "Block",
-            "quantity": 1,
-            "pn": "BK001",
-            "expectedDeliveryDate": "2025-01-19"
-        }
-    ],
-    "customer": "TEST",
-    "documentNumber": "00000000001"
-}'
-```
-* Check the index contents on Kibana. Navigate to the **Documents** of the orders_test and verify that the amount of the documents you registered are present within the index. 
-
 ## Deployed PKB on ATC cloud
 
 Since the latest version is deployed on the cloud you can access <https://kibana.modapto.atc.gr/app/security/dashboards> in a web browser and use the credentials above to log in.
-  
+---
+
+## License
+
+This project has received funding from the European Union's Horizon 2022 research and innovation programm, under Grant Agreement 101091996.
+
+For more details about the licence, see the [LICENSE](LICENSE) file.
+
+## Contributors
+
+- Stella Markopoulou (<s.markopoulou@aegisresearch.eu>)
