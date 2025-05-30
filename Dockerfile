@@ -72,3 +72,20 @@ CMD /entrypoint.sh && \
     /usr/share/logstash/bin/logstash & \
     /usr/share/kibana/bin/kibana & \
     tail -f /dev/null
+
+# Install Python and dependencies
+RUN apt-get update && \
+    apt-get install -y python3 python3-pip && \
+    pip3 install kafka-python elasticsearch && \
+    apt-get clean
+
+# Copy the Python script
+COPY ./filter_modules.py /filter_modules.py
+
+# Modify CMD to run ELK services + Python script
+CMD /entrypoint.sh & \
+    /usr/share/elasticsearch/bin/elasticsearch & \
+    /usr/share/logstash/bin/logstash & \
+    /usr/share/kibana/bin/kibana & \
+    python3 /filter_modules.py & \
+    tail -f /dev/null
