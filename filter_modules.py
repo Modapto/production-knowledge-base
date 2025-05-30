@@ -12,7 +12,7 @@ TOPICS = [
 TARGET_TOPIC = 'aegis-test'
 
 # Elasticsearch settings
-ES_HOST = 'http://localhost:9200'
+ES_HOST = "${ELASTICSEARCH_URL}"
 ES_INDEX = 'modapto-modules'
 
 # Connect to Elasticsearch without authentication
