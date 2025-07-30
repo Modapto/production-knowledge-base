@@ -66,13 +66,6 @@ ENV ELASTIC_PASSWORD=${ELASTIC_PASSWORD:-} \
     MONITORING_INTERNAL_PASSWORD=${MONITORING_INTERNAL_PASSWORD:-} \
     BEATS_SYSTEM_PASSWORD=${BEATS_SYSTEM_PASSWORD:-}
 
-# Start all services and keep container running
-CMD /entrypoint.sh && \
-    /usr/share/elasticsearch/bin/elasticsearch & \
-    /usr/share/logstash/bin/logstash & \
-    /usr/share/kibana/bin/kibana & \
-    tail -f /dev/null
-
 # Install Python and dependencies
 RUN apt-get update && \
     apt-get install -y python3 python3-pip && \
