@@ -114,6 +114,7 @@ services:
     restart: unless-stopped
     environment:
       ELASTICSEARCH_URL: ${ELASTICSEARCH_URL}
+      KAFKA_URL: ${KAFKA_URL}
 
 networks:
   elk:
