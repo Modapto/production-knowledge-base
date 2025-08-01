@@ -5,7 +5,7 @@ from kafka import KafkaConsumer, KafkaProducer
 from elasticsearch import Elasticsearch
 
 # Kafka settings
-KAFKA_BROKER = "kafka.modapto.atc.gr:9092"
+KAFKA_BROKER = os.getenv("KAFKA_URL","kafka:9092")
 
 TOPICS = [
     'modapto-module-creation',
