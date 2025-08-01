@@ -1,9 +1,12 @@
 import json
+import os
+
 from kafka import KafkaConsumer, KafkaProducer
 from elasticsearch import Elasticsearch
 
 # Kafka settings
-KAFKA_BROKER = 'kafka.modapto.atc.gr:9092'
+KAFKA_BROKER = "kafka.modapto.atc.gr:9092"
+
 TOPICS = [
     'modapto-module-creation',
     'modapto-module-deletion',
@@ -12,8 +15,11 @@ TOPICS = [
 TARGET_TOPIC = 'aegis-test'
 
 # Elasticsearch settings
-ES_HOST = "${ELASTICSEARCH_URL}"
+# ES_HOST = "${ELASTICSEARCH_URL}"
+ES_HOST = os.getenv("ELASTICSEARCH_URL", "http://elasticsearch:9200")
 ES_INDEX = 'modapto-modules'
+
+
 
 # Connect to Elasticsearch without authentication
 es = Elasticsearch(
