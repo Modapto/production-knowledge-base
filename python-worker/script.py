@@ -6,6 +6,7 @@ from elasticsearch import Elasticsearch
 
 # Kafka settings
 KAFKA_BROKER = os.getenv("KAFKA_URL","kafka:9092")
+ELASTIC_PASSWORD = os.getenv("ELASTIC_PASSWORD","###")
 
 TOPICS = [
     'modapto-module-creation',
@@ -24,7 +25,7 @@ ES_INDEX = 'modapto-modules'
 # Connect to Elasticsearch without authentication
 es = Elasticsearch(
     ES_HOST,
-    basic_auth=("elastic", "-AwgIfDWbt_Mb+Z=_+Ck"),
+    basic_auth=("elastic", ELASTIC_PASSWORD),
     headers={
         "Accept": "application/vnd.elasticsearch+json; compatible-with=8",
         "Content-Type": "application/vnd.elasticsearch+json; compatible-with=8"

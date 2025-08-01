@@ -115,6 +115,7 @@ services:
     environment:
       ELASTICSEARCH_URL: ${ELASTICSEARCH_URL}
       KAFKA_URL: ${KAFKA_URL}
+      ELASTIC_PASSWORD: ${ELASTIC_PASSWORD}
 
 networks:
   elk:
