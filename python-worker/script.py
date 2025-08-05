@@ -4,7 +4,9 @@ from kafka import KafkaConsumer, KafkaProducer
 from elasticsearch import Elasticsearch, NotFoundError
 
 # Kafka settings
-KAFKA_BROKER = "kafka.modapto.atc.gr:9092"
+KAFKA_BROKER = os.getenv("KAFKA_URL","kafka:9092")
+ELASTIC_PASSWORD = os.getenv("ELASTIC_PASSWORD","###")
+
 TOPICS = [
     "modapto-module-creation",
     "modapto-module-deletion",
@@ -23,7 +25,7 @@ ES_INDEX = "modapto-modules"
 # Connect to Elasticsearch
 es = Elasticsearch(
     ES_HOST,
-    basic_auth=(ES_USERNAME, ES_PASSWORD),
+    basic_auth=("elastic", ELASTIC_PASSWORD),
     headers={
         "Accept": "application/vnd.elasticsearch+json; compatible-with=8",
         "Content-Type": "application/vnd.elasticsearch+json; compatible-with=8"
