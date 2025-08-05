@@ -1,124 +1,144 @@
 import json
 import os
-
 from kafka import KafkaConsumer, KafkaProducer
-from elasticsearch import Elasticsearch
+from elasticsearch import Elasticsearch, NotFoundError
 
 # Kafka settings
 KAFKA_BROKER = "kafka.modapto.atc.gr:9092"
-
 TOPICS = [
-    'modapto-module-creation',
-    'modapto-module-deletion',
-    'modapto-module-update'
+    "modapto-module-creation",
+    "modapto-module-deletion",
+    "modapto-module-update",
+    "smart-service-assigned",
+    "smart-service-unassigned"
 ]
-TARGET_TOPIC = 'aegis-test'
+TARGET_TOPIC = "aegis-test"
 
 # Elasticsearch settings
-# ES_HOST = "${ELASTICSEARCH_URL}"
 ES_HOST = os.getenv("ELASTICSEARCH_URL", "http://elasticsearch:9200")
-ES_INDEX = 'modapto-modules'
+ES_USERNAME = os.getenv("ELASTIC_USERNAME", "elastic")
+ES_PASSWORD = os.getenv("ELASTIC_PASSWORD", "changeme")
+ES_INDEX = "modapto-modules"
 
-
-
-# Connect to Elasticsearch without authentication
+# Connect to Elasticsearch
 es = Elasticsearch(
     ES_HOST,
-    basic_auth=("elastic", "-AwgIfDWbt_Mb+Z=_+Ck"),
+    basic_auth=(ES_USERNAME, ES_PASSWORD),
     headers={
         "Accept": "application/vnd.elasticsearch+json; compatible-with=8",
         "Content-Type": "application/vnd.elasticsearch+json; compatible-with=8"
     }
 )
 
-# Kafka Consumer
+# Kafka consumer & producer
 consumer = KafkaConsumer(
     *TOPICS,
     bootstrap_servers=KAFKA_BROKER,
-    auto_offset_reset='earliest',
-    value_deserializer=lambda m: json.loads(m.decode('utf-8')),
+    auto_offset_reset="earliest",
+    value_deserializer=lambda m: json.loads(m.decode("utf-8")),
     enable_auto_commit=True,
-    group_id='modapto-handler'
+    group_id="modapto-handler"
 )
 
-# Kafka Producer
 producer = KafkaProducer(
     bootstrap_servers=KAFKA_BROKER,
-    value_serializer=lambda m: json.dumps(m).encode('utf-8')
+    value_serializer=lambda m: json.dumps(m).encode("utf-8")
 )
 
-print("🚀 Kafka Consumer running...")
+print("Kafka Consumer running...")
+
+def create_index_if_missing(index_name):
+    if not es.indices.exists(index=index_name):
+        print(f"Index '{index_name}' is not found. Creating index.. ")
+        es.indices.create(index=index_name)
+        print(f"Index '{index_name}' is created successfully.")
+
+
+def update_smart_services(module_id, service_data, assign=True):
+    try:
+        doc = es.get(index=ES_INDEX, id=module_id)["_source"]
+        services = doc.get("smartServices") or []
+
+        if assign:
+            if not any(s.get("serviceId") == service_data["serviceId"] for s in services):
+                services.append(service_data)
+        else:
+            services = [s for s in services if s.get("serviceId") != service_data["serviceId"]]
+
+        es.update(index=ES_INDEX, id=module_id, body={
+            "doc": {
+                "smartServices": services
+            }
+        })
+        print(f"{' Assigned' if assign else ' Unassigned'} smart service in module '{module_id}'")
+    except NotFoundError:
+        print(f" Module ID '{module_id}' not found in index '{ES_INDEX}'")
+
+
 
 for msg in consumer:
     topic = msg.topic
     event = msg.value
-    print(f"📩 Received message from topic: {topic}")
-    print(f"🔎 Raw event: {json.dumps(event, indent=2)}")
+    print(f" Received message from topic: {topic}")
+    print(f" Raw event: {json.dumps(event, indent=2)}")
 
     try:
         results = event.get("results", {})
         module_id = results.get("id")
-        print(f"🧩 Parsed ID: {module_id}")
 
         if topic == "modapto-module-creation":
-            print("📦 Handling module creation...")
-            new_doc = {
+            print(" Handling module creation...")
+            create_index_if_missing(ES_INDEX)
+            doc = {
                 "name": results.get("name"),
                 "id": module_id,
                 "endpoint": results.get("endpoint"),
                 "timestamp_elastic": msg.timestamp,
-                "sourceComponent": event.get("sourceComponent"),
                 "timestamp_dt": event.get("timestamp"),
-                "priority": event.get("priority"),
-                "event": {
-                    "original": json.dumps(event)
-                }
+                "smartServices": []
             }
-            print(f"📤 Sending new_doc to Kafka topic {TARGET_TOPIC}: {json.dumps(new_doc, indent=2)}")
-            producer.send(TARGET_TOPIC, value=new_doc)
-            print(f"✅ Sent to {TARGET_TOPIC}: {module_id}")
-
-        elif topic == "modapto-module-deletion":
-            print("❌ Handling module deletion...")
-            if module_id:
-                print(f"🗑️ Deleting document with ID: {module_id} from index {ES_INDEX}")
-                es.delete(index=ES_INDEX, id=module_id, ignore=[404])
-                print(f"🗑️ Deleted from Elasticsearch: {module_id}")
-            else:
-                print("⚠️ No module_id found in deletion event.")
+            es.index(index=ES_INDEX, id=module_id, document=doc)
+            print(f" Inserted document into '{ES_INDEX}': {module_id}")
+            producer.send(TARGET_TOPIC, value=doc)
 
         elif topic == "modapto-module-update":
-            print("🔁 Handling module update...")
+            print(" Handling module update...")
             if module_id:
                 update_doc = {
                     "doc": {
                         "name": results.get("name"),
                         "endpoint": results.get("endpoint"),
                         "timestamp_dt": event.get("timestamp"),
-                        "priority": event.get("priority"),
-                        "sourceComponent": event.get("sourceComponent"),
-                        "event": {
-                            "original": json.dumps(event)
-                        }
+                        "timestamp_elastic": msg.timestamp
                     },
-                    "upsert": {
-                        "name": results.get("name"),
-                        "id": module_id,
-                        "endpoint": results.get("endpoint"),
-                        "timestamp_elastic": msg.timestamp,
-                        "sourceComponent": event.get("sourceComponent"),
-                        "timestamp_dt": event.get("timestamp"),
-                        "priority": event.get("priority"),
-                        "event": {
-                            "original": json.dumps(event)
-                        }
-                    }
+                    "doc_as_upsert": True
                 }
-                print(f"🧾 Elasticsearch update body: {json.dumps(update_doc, indent=2)}")
                 es.update(index=ES_INDEX, id=module_id, body=update_doc)
-                print(f"🔄 Updated in Elasticsearch: {module_id}")
+                print(f" Updated document in '{ES_INDEX}': {module_id}")
             else:
-                print("⚠️ No module_id found in update event.")
+                print(" No module_id found in update event.")
+
+        elif topic == "modapto-module-deletion":
+            print(" Handling module deletion...")
+            if module_id:
+                try:
+                    es.delete(index=ES_INDEX, id=module_id)
+                    print(f" Deleted document from '{ES_INDEX}': {module_id}")
+                except NotFoundError:
+                    print(f" Document with ID '{module_id}' not found in '{ES_INDEX}'")
+            else:
+                print(" No module_id found in deletion event.")
+      
+        elif topic in ["smart-service-assigned", "smart-service-unassigned"]:
+                    module_id = event.get("module")
+                    assign = topic == "smart-service-assigned"
+                    service_data = {
+                        "name": results.get("name"),
+                        "catalogueId": results.get("serviceCatalogId"),
+                        "serviceId": results.get("id"),
+                        "url": results.get("endpoint")
+                    }
+                    update_smart_services(module_id, service_data, assign=assign)
 
     except Exception as e:
-        print(f"❌ Error handling message: {e}")
+        print(f" Error handling message: {e}")
