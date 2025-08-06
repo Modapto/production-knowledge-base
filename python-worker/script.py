@@ -2,6 +2,8 @@ import json
 import os
 from kafka import KafkaConsumer, KafkaProducer
 from elasticsearch import Elasticsearch, NotFoundError
+import base64
+
 
 # Kafka settings
 KAFKA_BROKER = os.getenv("KAFKA_URL","kafka:9092")
@@ -12,7 +14,9 @@ TOPICS = [
     "modapto-module-deletion",
     "modapto-module-update",
     "smart-service-assigned",
-    "smart-service-unassigned"
+    "smart-service-unassigned",
+    "base64-input-events"
+
 ]
 TARGET_TOPIC = "aegis-test"
 
@@ -21,6 +25,9 @@ ES_HOST = os.getenv("ELASTICSEARCH_URL", "http://elasticsearch:9200")
 ES_USERNAME = os.getenv("ELASTIC_USERNAME", "elastic")
 ES_PASSWORD = os.getenv("ELASTIC_PASSWORD", "changeme")
 ES_INDEX = "modapto-modules"
+
+# Decoded index 
+DECODED_INDEX = "decoded-events"
 
 # Connect to Elasticsearch
 es = Elasticsearch(
@@ -142,5 +149,38 @@ for msg in consumer:
                     }
                     update_smart_services(module_id, service_data, assign=assign)
 
+# todo: create for the base64 events the respective indices if not availble. 
+        elif topic == "base64-input-events":
+            print(" Handling base64 encoded input...")
+            decode_base64_event(event)
+
     except Exception as e:
         print(f" Error handling message: {e}")
+
+
+def decode_base64_event(event):
+    try:
+        event_id = event.get("id")
+        timestamp = event.get("timestamp")
+
+        # todo: check the encoded field within the events 
+        encoded_data = event.get("encoded") 
+
+        if not encoded_data:
+            print(" No 'encoded' field found in event.")
+            return
+
+        decoded_bytes = base64.b64decode(encoded_data)
+        decoded_string = decoded_bytes.decode("utf-8")
+
+        doc = {
+            "id": event_id,
+            "timestamp": timestamp,
+            "decoded": decoded_string
+        }
+
+        es.index(index=DECODED_INDEX, id=event_id, document=doc)
+        print(f" Decoded and stored event '{event_id}' in index '{DECODED_INDEX}'.")
+
+    except Exception as e:
+        print(f" Failed to decode base64 event: {e}")
