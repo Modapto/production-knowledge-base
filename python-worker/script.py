@@ -5,6 +5,7 @@ from elasticsearch import Elasticsearch, NotFoundError
 import base64
 
 
+
 # Kafka settings
 KAFKA_BROKER = os.getenv("KAFKA_URL","kafka:9092")
 ELASTIC_PASSWORD = os.getenv("ELASTIC_PASSWORD","###")
@@ -28,6 +29,10 @@ ES_INDEX = "modapto-modules"
 
 # Decoded index 
 DECODED_INDEX = "decoded-events"
+
+print("=== Starting pyworker script ===")
+print(f"Elasticsearch host: {ES_HOST}")
+print(f"Listening to topics: {TOPICS}")
 
 # Connect to Elasticsearch
 es = Elasticsearch(
