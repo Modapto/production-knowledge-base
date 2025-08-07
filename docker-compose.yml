@@ -116,6 +116,7 @@ services:
       ELASTICSEARCH_URL: ${ELASTICSEARCH_URL}
       KAFKA_URL: ${KAFKA_URL}
       ELASTIC_PASSWORD: ${ELASTIC_PASSWORD}
+      PYTHONUNBUFFERED: 1
     command: python script.py
 
 networks:
