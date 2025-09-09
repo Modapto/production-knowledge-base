@@ -116,8 +116,12 @@ services:
       ELASTICSEARCH_URL: ${ELASTICSEARCH_URL}
       KAFKA_URL: ${KAFKA_URL}
       ELASTIC_PASSWORD: ${ELASTIC_PASSWORD}
+      FRONTEND_ORIGIN: ${FRONTEND_ORIGIN}
+      RUN_MODE: ${RUN_MODE}
       PYTHONUNBUFFERED: 1
     command: python script.py
+    ports:
+      - "5055:5000"
 
 networks:
   elk:

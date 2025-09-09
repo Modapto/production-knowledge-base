@@ -2,401 +2,617 @@ import json
 import os
 import sys
 import logging
-from kafka import KafkaConsumer, KafkaProducer
-from elasticsearch import Elasticsearch, NotFoundError
 import base64
+import threading
+import signal
+import time
+from typing import Literal, Optional
+from datetime import datetime
 
+try:
+    from kafka import KafkaConsumer, KafkaProducer
+except Exception:
+    KafkaConsumer = None
+    KafkaProducer = None
 
-# Configure logging
+# --- Elasticsearch ---
+from elasticsearch import Elasticsearch, NotFoundError
+
+# --- HTTP API ---
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field, conint, confloat
+
+# ---------------------------------
+# Logging
+# ---------------------------------
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout)
-    ]
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("modapto-worker")
 
-# Kafka settings
-KAFKA_BROKER = os.getenv("KAFKA_endpoint", "kafka:9092")
-ELASTIC_PASSWORD = os.getenv("ELASTIC_PASSWORD", "###")
+# ---------------------------------
+# Config / Env
+# ---------------------------------
+RUN_MODE = os.getenv("RUN_MODE", "both").lower()  # 'api' | 'kafka' | 'both'
+FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "*")
 
+# Kafka
+KAFKA_BROKER = os.getenv("KAFKA_URL", "kafka:9092")
 TOPICS = [
     "modapto-module-creation",
     "modapto-module-deletion",
     "modapto-module-update",
     "smart-service-assigned",
     "smart-service-unassigned",
-    "base64-input-events"
+    "base64-input-events",
 ]
 TARGET_TOPIC = "aegis-test"
 
-# Elasticsearch settings
-ES_HOST = os.getenv("ELASTICSEARCH_endpoint", "http://elasticsearch:9200")
+# Elasticsearch
+ES_HOST = os.getenv("ELASTICSEARCH_URL", "http://elasticsearch:9200")
 ES_USERNAME = os.getenv("ELASTIC_USERNAME", "elastic")
 ES_PASSWORD = os.getenv("ELASTIC_PASSWORD", "changeme")
+
+# Indexes
 ES_INDEX = "modapto-modules"
-
-# Decoded index 
 DECODED_INDEX = "decoded-events"
+PROCESS_DRIFT_INDEX = "process_drift"  
 
-logger.info(f"Connecting to Elasticsearch at: {ES_HOST}")
-logger.info(f"Connecting to Kafka at: {KAFKA_BROKER}")
-logger.info(f"Listening to topics: {TOPICS}")
+logger.info(f"Elasticsearch: {ES_HOST}")
+logger.info(f"Kafka broker: {KAFKA_BROKER}")
+logger.info(f"Kafka topics: {TOPICS}")
+logger.info(f"RUN_MODE={RUN_MODE}")
 
-# Connect to Elasticsearch
+# ---------------------------------
+# Elasticsearch client
+# ---------------------------------
 try:
     es = Elasticsearch(
         ES_HOST,
-        basic_auth=("elastic", ELASTIC_PASSWORD),
+        basic_auth=(ES_USERNAME, ES_PASSWORD),
         headers={
             "Accept": "application/vnd.elasticsearch+json; compatible-with=8",
-            "Content-Type": "application/vnd.elasticsearch+json; compatible-with=8"
-        }
+            "Content-Type": "application/vnd.elasticsearch+json; compatible-with=8",
+        },
     )
-    # Test connection
     es.info()
     logger.info("Elasticsearch connection successful")
 except Exception as e:
     logger.error(f"Elasticsearch connection failed: {e}")
     sys.exit(1)
 
-# Kafka consumer & producer
-try:
-    consumer = KafkaConsumer(
-        *TOPICS,
-        bootstrap_servers=KAFKA_BROKER,
-        auto_offset_reset="earliest",
-        value_deserializer=lambda m: json.loads(m.decode("utf-8")),
-        enable_auto_commit=True,
-        group_id="modapto-handler"
-    )
-    
-    producer = KafkaProducer(
-        bootstrap_servers=KAFKA_BROKER,
-        value_serializer=lambda m: json.dumps(m).encode("utf-8")
-    )
-    logger.info("Kafka connection successful")
-except Exception as e:
-    logger.error(f"Kafka connection failed: {e}")
-    sys.exit(1)
+# ---------------------------------
+# Kafka init 
+# ---------------------------------
+consumer = None
+producer = None
+kafka_ready = False
+stop_event = threading.Event()
 
+def init_kafka():
+    global consumer, producer, kafka_ready
+    if KafkaConsumer is None or KafkaProducer is None:
+        logger.error("kafka-python is not installed. Install it to use Kafka mode.")
+        raise RuntimeError("Kafka not available")
 
-def find_document_by_module_id(module_id, index_name=ES_INDEX):
-    """Find Elasticsearch document by moduleId field"""
     try:
-        search_query = {
-            "query": {
-                "term": {
-                    "moduleId": module_id
-                }
-            }
-        }
-        
-        search_response = es.search(index=index_name, body=search_query)
-        hits = search_response.get("hits", {}).get("hits", [])
-        
-        if not hits:
-            logger.warning(f"No document found with moduleId '{module_id}' in index '{index_name}'")
-            return None, None
-        
-        if len(hits) > 1:
-            logger.warning(f"Multiple documents found with moduleId '{module_id}'. Using the first one.")
-        
-        # Return document ID and source
-        doc_hit = hits[0]
-        doc_id = doc_hit["_id"]
-        doc_source = doc_hit["_source"]
-        
-        logger.debug(f"Found document with ID '{doc_id}' for moduleId '{module_id}'")
-        return doc_id, doc_source
-        
+        consumer = KafkaConsumer(
+            *TOPICS,
+            bootstrap_servers=KAFKA_BROKER,
+            auto_offset_reset="earliest",
+            value_deserializer=lambda m: json.loads(m.decode("utf-8")),
+            enable_auto_commit=True,
+            group_id="modapto-handler",
+        )
+        producer = KafkaProducer(
+            bootstrap_servers=KAFKA_BROKER,
+            value_serializer=lambda m: json.dumps(m).encode("utf-8"),
+        )
+        kafka_ready = True
+        logger.info("Kafka connection successful")
     except Exception as e:
-        logger.error(f"Error searching for moduleId '{module_id}': {e}")
-        return None, None
+        kafka_ready = False
+        logger.error(f"Kafka connection failed: {e}")
+        raise
 
-
-def create_index_if_missing(index_name):
-    """Create Elasticsearch index if it doesn't exist"""
+# ---------------------------------
+# ES helpers
+# ---------------------------------
+def create_index_if_missing(index_name, mappings=None, settings=None):
     try:
         if not es.indices.exists(index=index_name):
-            logger.info(f"Index '{index_name}' not found. Creating index...")
-            es.indices.create(index=index_name)
-            logger.info(f"Index '{index_name}' created successfully")
-        else:
-            logger.debug(f"Index '{index_name}' already exists")
+            logger.info(f"Index '{index_name}' not found. Creating...")
+            body = {}
+            if settings:
+                body["settings"] = settings
+            if mappings:
+                body["mappings"] = {"properties": mappings["properties"]} if "properties" in mappings else mappings
+            es.indices.create(index=index_name, body=body or None)
+            logger.info(f"Index '{index_name}' created.")
     except Exception as e:
         logger.error(f"Failed to create index '{index_name}': {e}")
         raise
 
+def find_document_by_module_id(module_id, index_name=ES_INDEX):
+    try:
+        search_query = {"query": {"term": {"moduleId": module_id}}}
+        search_response = es.search(index=index_name, body=search_query)
+        hits = search_response.get("hits", {}).get("hits", [])
+        if not hits:
+            logger.warning(f"No doc with moduleId '{module_id}' in '{index_name}'")
+            return None, None
+        if len(hits) > 1:
+            logger.warning(f"Multiple docs for moduleId '{module_id}'. Using first.")
+        hit = hits[0]
+        return hit["_id"], hit["_source"]
+    except Exception as e:
+        logger.error(f"Error searching moduleId '{module_id}': {e}")
+        return None, None
+
+# ---------------------------------
+# Mappings 
+# ---------------------------------
+PROCESS_DRIFT_MAPPINGS = {
+    "properties": {
+        "moduleId": {"type": "keyword"},  
+        "module": {"type": "keyword"},    
+        "component": {"type": "keyword"},
+
+        # UI form 
+        "stage": {"type": "keyword"},
+        "cell": {"type": "keyword"},
+        "failureType": {"type": "keyword"},
+        "failureDescription": {"type": "text"},
+        "maintenanceAction": {"type": "text"},
+        "componentReplacement": {"type": "keyword"},
+        "workerName": {"type": "keyword"},
+        "driftDone": {"type": "boolean"},
+
+        # Timestamps
+        "timestamp": {"type": "date"},               # event timestamp UI
+        "timestamp_api_received": {"type": "date"},  # server-side
+        "starttime": {"type": "date"},               # moment START declared
+        "endtime": {"type": "date"},                 # moment DONE toggled
+
+        # Meta
+        "source": {"type": "keyword"}  # 'eds'
+    }
+}
+
+
 
 def update_smart_services(module_id, service_data, assign=True, event=None, msg=None):
-    """Update smart services for a module by searching for moduleId field"""
     try:
         doc_id, doc_source = find_document_by_module_id(module_id)
-        
         if not doc_id or not doc_source:
             logger.error(f"Cannot update smart services: module '{module_id}' not found")
             return
-        
-        services = doc_source.get("smartServices") or []
 
+        services = doc_source.get("smartServices") or []
         if assign:
             if not any(s.get("serviceId") == service_data["serviceId"] for s in services):
                 services.append(service_data)
-                logger.info(f"Assigned smart service '{service_data['serviceId']}' to module '{module_id}'")
+                logger.info(f"Assigned service '{service_data['serviceId']}' to module '{module_id}'")
             else:
-                logger.warning(f"Service '{service_data['serviceId']}' already assigned to module '{module_id}'")
+                logger.warning(f"Service '{service_data['serviceId']}' already assigned")
         else:
-            original_count = len(services)
+            before = len(services)
             services = [s for s in services if s.get("serviceId") != service_data["serviceId"]]
-            if len(services) < original_count:
-                logger.info(f"Unassigned smart service '{service_data['serviceId']}' from module '{module_id}'")
+            if len(services) < before:
+                logger.info(f"Unassigned service '{service_data['serviceId']}' from '{module_id}'")
             else:
-                logger.warning(f"Service '{service_data['serviceId']}' was not assigned to module '{module_id}'")
+                logger.warning(f"Service '{service_data['serviceId']}' was not assigned to begin with")
 
-        # Update using the actual document ID
-        es.update(index=ES_INDEX, id=doc_id, body={
-            "doc": {
-                "timestamp_elastic": msg.timestamp,
-                "timestamp_dt": event.get("timestamp"),
-                "smartServices": services
-            }
-        })
-        
+        es.update(
+            index=ES_INDEX,
+            id=doc_id,
+            body={
+                "doc": {
+                    "timestamp_elastic": getattr(msg, "timestamp", None),
+                    "timestamp_dt": event.get("timestamp") if event else None,
+                    "smartServices": services,
+                }
+            },
+        )
     except Exception as e:
-        logger.error(f"Failed to update smart services for module '{module_id}': {e}")
-
+        logger.error(f"Failed to update smart services for '{module_id}': {e}")
 
 def decode_base64_event(event):
-    """Decode base64 encoded events and store in Elasticsearch"""
     try:
         event_id = event.get("id")
         timestamp = event.get("timestamp")
         encoded_data = event.get("encoded")
-
-        if not encoded_data:
-            logger.warning("No 'encoded' field found in base64 event")
+        if not encoded_data or not event_id:
+            logger.warning("Missing 'encoded' or 'id' in base64 event")
             return
 
-        if not event_id:
-            logger.warning("No 'id' field found in base64 event")
-            return
-
-        # Create index if missing
         create_index_if_missing(DECODED_INDEX)
-
-        # Decode base64 data
-        decoded_bytes = base64.b64decode(encoded_data)
-        decoded_string = decoded_bytes.decode("utf-8")
-
+        decoded = base64.b64decode(encoded_data).decode("utf-8")
         doc = {
             "id": event_id,
             "timestamp": timestamp,
-            "decoded": decoded_string,
-            "original_encoded": encoded_data[:100] + "..." if len(encoded_data) > 100 else encoded_data
+            "decoded": decoded,
+            "original_encoded": encoded_data[:100] + "..." if len(encoded_data) > 100 else encoded_data,
         }
-
         es.index(index=DECODED_INDEX, id=event_id, document=doc)
-        logger.info(f"Decoded and stored event '{event_id}' in index '{DECODED_INDEX}'")
-        logger.debug(f"Decoded content preview: {decoded_string[:200]}..." if len(decoded_string) > 200 else decoded_string)
-
+        logger.info(f"Decoded and stored base64 event '{event_id}'")
     except Exception as e:
         logger.error(f"Failed to decode base64 event: {e}")
         logger.debug(f"Event data: {json.dumps(event, indent=2)}")
 
-
 def handle_module_creation(event, msg):
-    """Handle module creation events"""
     logger.info("Handling module creation...")
     results = event.get("results", {})
     module_id = results.get("id")
-    
     if not module_id:
-        logger.error("No module ID found in creation event")
+        logger.error("No module ID in creation event")
         return
-    
+
     create_index_if_missing(ES_INDEX)
     doc = {
         "name": results.get("name"),
         "moduleId": module_id,
         "endpoint": results.get("endpoint"),
-        "timestamp_elastic": msg.timestamp,
+        "timestamp_elastic": getattr(msg, "timestamp", None),
         "timestamp_dt": event.get("timestamp"),
-        "smartServices": []
+        "smartServices": [],
     }
-    
-    # Use a generated document ID instead of module_id
     es.index(index=ES_INDEX, document=doc)
-    logger.info(f"Inserted module document with moduleId '{module_id}' into '{ES_INDEX}'")
-    
-    # Send to target topic
-    producer.send(TARGET_TOPIC, value=doc)
-    logger.debug(f"Sent module creation event to topic '{TARGET_TOPIC}'")
+    logger.info(f"Inserted module document (moduleId='{module_id}') into '{ES_INDEX}'")
 
+    if producer:
+        producer.send(TARGET_TOPIC, value=doc)
+        logger.debug(f"Sent module creation to topic '{TARGET_TOPIC}'")
 
 def handle_module_update(event, msg):
-    """Handle module update events"""
     logger.info("Handling module update...")
     results = event.get("results", {})
     module_id = event.get("module")
-    
     if not module_id:
-        logger.error("No module ID found in update event")
+        logger.error("No module ID in update event")
         return
-    
+
     try:
-        doc_id, doc_source = find_document_by_module_id(module_id)
-        
+        doc_id, _ = find_document_by_module_id(module_id)
         if not doc_id:
-            logger.warning(f"No document found with moduleId '{module_id}' for update. Creating new document.")
-            # Create new document if not found
+            logger.warning(f"No doc for moduleId '{module_id}'. Creating new.")
             doc = {
                 "name": results.get("name"),
                 "moduleId": module_id,
                 "endpoint": results.get("endpoint"),
                 "timestamp_dt": event.get("timestamp"),
-                "timestamp_elastic": msg.timestamp,
-                "smartServices": []
+                "timestamp_elastic": getattr(msg, "timestamp", None),
+                "smartServices": [],
             }
             es.index(index=ES_INDEX, document=doc)
-            logger.info(f"Created new module document with moduleId '{module_id}' in '{ES_INDEX}'")
+            logger.info(f"Created new module document for '{module_id}'")
             return
-        
+
         update_doc = {
             "doc": {
                 "name": results.get("name"),
                 "endpoint": results.get("endpoint"),
                 "timestamp_dt": event.get("timestamp"),
-                "timestamp_elastic": msg.timestamp
+                "timestamp_elastic": getattr(msg, "timestamp", None),
             }
         }
-        
         es.update(index=ES_INDEX, id=doc_id, body=update_doc)
-        logger.info(f"Updated module document with moduleId '{module_id}' in '{ES_INDEX}'")
-        
+        logger.info(f"Updated module document for '{module_id}'")
     except Exception as e:
         logger.error(f"Failed to update module '{module_id}': {e}")
 
-
 def handle_module_deletion(event):
-    """Handle module deletion events"""
     logger.info("Handling module deletion...")
     module_id = event.get("module")
-    
     if not module_id:
-        logger.error("No module ID found in deletion event")
+        logger.error("No module ID in deletion event")
         return
-    
+
     try:
-        # Search for all documents with matching moduleId field
-        search_query = {
-            "query": {
-                "term": {
-                    "moduleId": module_id
-                }
-            }
-        }
-        
-        search_response = es.search(index=ES_INDEX, body=search_query)
-        hits = search_response.get("hits", {}).get("hits", [])
-        
+        search_query = {"query": {"term": {"moduleId": module_id}}}
+        resp = es.search(index=ES_INDEX, body=search_query)
+        hits = resp.get("hits", {}).get("hits", [])
         if not hits:
-            logger.warning(f"No document found with moduleId '{module_id}' for deletion")
+            logger.warning(f"No documents with moduleId '{module_id}' for deletion")
             return
-        
-        # Delete all matching documents
-        deleted_count = 0
+        deleted = 0
         for hit in hits:
-            doc_id = hit["_id"]
-            es.delete(index=ES_INDEX, id=doc_id)
-            deleted_count += 1
-            logger.debug(f"Deleted document with ID '{doc_id}' for moduleId '{module_id}'")
-        
-        logger.info(f"Deleted {deleted_count} document(s) with moduleId '{module_id}' from '{ES_INDEX}'")
-        
+            es.delete(index=ES_INDEX, id=hit["_id"])
+            deleted += 1
+        logger.info(f"Deleted {deleted} document(s) for moduleId '{module_id}'")
     except Exception as e:
         logger.error(f"Failed to delete module '{module_id}': {e}")
 
-
 def handle_smart_service_event(event, topic, msg):
-    """Handle smart service assignment/unassignment events"""
     results = event.get("results", {})
     module_id = event.get("module")
     assign = topic == "smart-service-assigned"
-    
     if not module_id:
-        logger.error(f"No module ID found in {topic} event")
+        logger.error(f"No module ID in {topic} event")
         return
-    
+
     service_data = {
         "name": results.get("name"),
         "catalogueId": results.get("serviceCatalogId"),
         "serviceId": results.get("id"),
-        "endpoint": results.get("endpoint")
+        "endpoint": results.get("endpoint"),
     }
-    
-    logger.info(f"Handling smart service {'assignment' if assign else 'unassignment'} for module '{module_id}'")
+    logger.info(f"Handling smart service {'assignment' if assign else 'unassignment'} for '{module_id}'")
     update_smart_services(module_id, service_data, assign=assign, event=event, msg=msg)
 
+# ---------------------------------
+# FastAPI models & app
+# ---------------------------------
 
-def main():
-    """Main event processing loop"""
-    logger.info("Kafka Consumer started successfully")
-    logger.info("Waiting for messages...")
-    
+
+class DriftPayload(BaseModel):
+    # IDs / required
+    moduleId: str = Field(..., min_length=1)
+    component: str = Field(..., min_length=1)
+
+    # UI form fields (all required όπως το Angular validation σου τώρα)
+    stage: str = Field(..., min_length=1)
+    cell: str = Field(..., min_length=1)
+    failureType: str = Field(..., min_length=1)
+    failureDescription: str = Field(..., min_length=1)
+    maintenanceAction: str = Field(..., min_length=1)
+    componentReplacement: str = Field(..., min_length=1)
+    workerName: str = Field(..., min_length=1)
+    driftDone: bool = Field(...)
+
+    # generic timestamp from UI and lifecycle all ISO
+    timestamp: str  
+    starttime: str 
+    endtime: str    
+
+    # optional module name
+    module: Optional[str] = None
+
+app = FastAPI(title="Process Drift API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[FRONTEND_ORIGIN] if FRONTEND_ORIGIN != "*" else ["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.get("/healthz")
+def healthz():
+    ok_es = False
     try:
-        message_count = 0
-        for msg in consumer:
-            message_count += 1
-            topic = msg.topic
-            event = msg.value
-            
-            logger.info(f"Received message #{message_count} from topic: '{topic}'")
-            logger.debug(f"Raw event: {json.dumps(event, indent=2)}")
+        es.info()
+        ok_es = True
+    except Exception:
+        ok_es = False
+    return {
+        "ok": True,
+        "elastic_ok": ok_es,
+        "kafka_enabled": RUN_MODE in ("kafka", "both"),
+        "kafka_ready": kafka_ready,
+        "mode": RUN_MODE,
+        "time": datetime.utcnow().isoformat() + "Z",
+    }
 
-            try:
-                # Route messages based on topic
-                if topic == "modapto-module-creation":
-                    handle_module_creation(event, msg)
-                    
-                elif topic == "modapto-module-update":
-                    handle_module_update(event, msg)
-                    
-                elif topic == "modapto-module-deletion":
-                    handle_module_deletion(event)
-                    
-                elif topic in ["smart-service-assigned", "smart-service-unassigned"]:
-                    handle_smart_service_event(event, topic, msg)
-                    
-                elif topic == "base64-input-events":
-                    logger.info("Handling base64 encoded input...")
-                    decode_base64_event(event)
-                    
-                else:
-                    logger.warning(f"Unknown topic received: '{topic}'")
-                    
-                logger.info(f"Successfully processed message from '{topic}'")
-                
-            except Exception as e:
-                logger.error(f"Error processing message from '{topic}': {e}")
-                logger.debug(f"Failed event data: {json.dumps(event, indent=2)}")
-                continue
+@app.post("/process-drift")
+def process_drift(payload: DriftPayload):
+    """Upsert by moduleId στο index 'process_drift'."""
+    try:
+        create_index_if_missing(PROCESS_DRIFT_INDEX, mappings=PROCESS_DRIFT_MAPPINGS)
 
-    except KeyboardInterrupt:
-        logger.info("Received shutdown signal, stopping gracefully...")
+        endtime_val = payload.endtime if payload.endtime else None
+        doc = {
+            "moduleId": payload.moduleId,
+            "module": payload.module,
+            "component": payload.component,
+            "stage": payload.stage,
+            "cell": payload.cell,
+            "failureType": payload.failureType,
+            "failureDescription": payload.failureDescription,
+            "maintenanceAction": payload.maintenanceAction,
+            "componentReplacement": payload.componentReplacement,
+            "workerName": payload.workerName,
+            "driftDone": payload.driftDone,
+            "timestamp": payload.timestamp,
+            "timestamp_api_received": datetime.utcnow().isoformat() + "Z",
+            "starttime": payload.starttime,
+            "endtime": endtime_val,
+            "source": "eds",
+        }
+
+        res = es.update(
+            index=PROCESS_DRIFT_INDEX,
+            id=payload.moduleId,
+            body={"doc": doc, "doc_as_upsert": True},
+            refresh="wait_for",
+        )
+        return {"ok": True, "result": res.get("result")}
     except Exception as e:
-        logger.error(f"Fatal error in main loop: {e}")
-        raise
-    finally:
-        logger.info("Closing Kafka consumer and producer...")
+        logger.exception("Failed to upsert process-drift")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+
+@app.get("/process-drift/{module_id}")
+def get_process_drift_by_module(module_id: str):
+    """id=module_id. fallback to search."""
+    try:
+        create_index_if_missing(PROCESS_DRIFT_INDEX, mappings=PROCESS_DRIFT_MAPPINGS)
+
         try:
-            consumer.close()
-            producer.close()
+            hit = es.get(index=PROCESS_DRIFT_INDEX, id=module_id)
+            return {"ok": True, "id": hit["_id"], "source": hit["_source"]}
+        except NotFoundError:
+            pass  # fallback
+
+        es_query = {
+            "bool": {
+                "should": [
+                    {"term": {"moduleId": module_id}},
+                    {"term": {"moduleId.keyword": module_id}},
+                    {"match_phrase": {"moduleId": module_id}},
+                ],
+                "minimum_should_match": 1,
+            }
+        }
+        resp = es.search(
+            index=PROCESS_DRIFT_INDEX,
+            query=es_query,
+            size=1,
+            sort=[
+                {"timestamp_api_received": {"order": "desc", "unmapped_type": "date"}},
+                {"timestamp": {"order": "desc", "unmapped_type": "date"}},
+            ],
+        )
+        hits = resp.get("hits", {}).get("hits", [])
+        if not hits:
+            raise HTTPException(status_code=404, detail="404: No process-drift found for moduleId")
+
+        hit = hits[0]
+        return {"ok": True, "id": hit["_id"], "source": hit["_source"]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Failed to read process-drift")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/process-drift/{module_id}")
+def delete_process_drift(module_id: str):
+    """delete declared drift (id=moduleId). Fallback delete_by_query"""
+    try:
+        create_index_if_missing(PROCESS_DRIFT_INDEX, mappings=PROCESS_DRIFT_MAPPINGS)
+
+        try:
+            res = es.delete(index=PROCESS_DRIFT_INDEX, id=module_id, refresh="wait_for")
+            return {"ok": True, "result": "deleted", "by": "id"}
+        except NotFoundError:
+            pass
+
+        es_query = {
+            "bool": {
+                "should": [
+                    {"term": {"moduleId": module_id}},
+                    {"term": {"moduleId.keyword": module_id}},
+                    {"match_phrase": {"moduleId": module_id}},
+                ],
+                "minimum_should_match": 1,
+            }
+        }
+        res = es.delete_by_query(index=PROCESS_DRIFT_INDEX, body={"query": es_query}, refresh=True)
+        deleted = res.get("deleted", 0)
+        if deleted == 0:
+            raise HTTPException(status_code=404, detail="404: No process-drift found to delete for moduleId")
+        return {"ok": True, "result": "deleted", "by": "query", "deleted_count": deleted}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Failed to delete process-drift")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+
+# ---------------------------------
+# Kafka consumer loop (thread)
+# ---------------------------------
+def kafka_loop():
+    logger.info("Kafka consumer thread starting...")
+    try:
+        init_kafka()
+    except Exception:
+        logger.error("Kafka init failed; consumer thread not started.")
+        return
+
+    message_count = 0
+    try:
+        while not stop_event.is_set():
+            msg = consumer.poll(timeout_ms=500)
+            if not msg:
+                continue
+            for tp, records in msg.items():
+                for record in records:
+                    message_count += 1
+                    topic = record.topic
+                    event = record.value
+                    logger.info(f"[Kafka] #{message_count} from '{topic}'")
+                    try:
+                        if topic == "modapto-module-creation":
+                            handle_module_creation(event, record)
+                        elif topic == "modapto-module-update":
+                            handle_module_update(event, record)
+                        elif topic == "modapto-module-deletion":
+                            handle_module_deletion(event)
+                        elif topic in ["smart-service-assigned", "smart-service-unassigned"]:
+                            handle_smart_service_event(event, topic, record)
+                        elif topic == "base64-input-events":
+                            logger.info("Handling base64 encoded input...")
+                            decode_base64_event(event)
+                        else:
+                            logger.warning(f"Unknown topic received: '{topic}'")
+                        logger.info(f"[Kafka] processed from '{topic}'")
+                    except Exception as e:
+                        logger.error(f"[Kafka] Error processing message from '{topic}': {e}")
+                        logger.debug(f"Failed event data: {json.dumps(event, indent=2)}")
+                        continue
+    except Exception as e:
+        logger.error(f"[Kafka] Fatal loop error: {e}")
+    finally:
+        logger.info("[Kafka] Closing consumer/producer...")
+        try:
+            if consumer:
+                consumer.close()
+            if producer:
+                producer.close()
         except Exception as e:
-            logger.error(f"Error closing Kafka connections: {e}")
-        logger.info("Application shutdown complete")
+            logger.error(f"Kafka] Error on close: {e}")
+        logger.info("[Kafka] Thread exit.")
 
+# ---------------------------------
+# Entrypoint helpers
+# ---------------------------------
+def run_api_blocking():
+    import uvicorn
+    host = os.getenv("API_HOST", "0.0.0.0")
+    port = int(os.getenv("API_PORT", "5000"))
+    logger.info(f"Starting FastAPI on {host}:{port} (CORS origin: {FRONTEND_ORIGIN})")
+    uvicorn.run(app, host=host, port=port, log_level="info")
 
+def main_both():
+    t = threading.Thread(target=kafka_loop, name="kafka-consumer", daemon=True)
+    t.start()
+    run_api_blocking()
+    stop_event.set()
+    t.join(timeout=5)
+
+def main_kafka_only():
+    kafka_loop()
+
+def main_api_only():
+    run_api_blocking()
+
+def signal_handler(sig, frame):
+    logger.info(f"Signal {sig} received; shutting down...")
+    stop_event.set()
+    time.sleep(0.5)
+    sys.exit(0)
+
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
+
+# ---------------------------------
+# Main
+# ---------------------------------
 if __name__ == "__main__":
-    main()
+    if RUN_MODE == "both":
+        main_both()
+    elif RUN_MODE == "kafka":
+        main_kafka_only()
+    elif RUN_MODE == "api":
+        main_api_only()
+    else:
+        logger.warning(f"Unknown RUN_MODE '{RUN_MODE}', defaulting to 'both'")
+        main_both()
