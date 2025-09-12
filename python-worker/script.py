@@ -39,6 +39,12 @@ logger = logging.getLogger("modapto-worker")
 RUN_MODE = os.getenv("RUN_MODE", "both").lower()  # 'api' | 'kafka' | 'both'
 FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "*")
 
+GROUPING_TOPIC = "grouping-predictive-maintenance"
+THRESHOLD_TOPIC = "threshold-predictive-maintenance"
+
+GROUPING_INDEX = "sew-grouping-predictive-maintenance-results"
+THRESHOLD_INDEX = "sew-threshold-predictive-maintenance-results"
+
 # Kafka
 KAFKA_BROKER = os.getenv("KAFKA_URL", "kafka:9092")
 TOPICS = [
@@ -48,8 +54,45 @@ TOPICS = [
     "smart-service-assigned",
     "smart-service-unassigned",
     "base64-input-events",
+    GROUPING_TOPIC,
+    THRESHOLD_TOPIC,
 ]
 TARGET_TOPIC = "aegis-test"
+
+# MAPPINGS
+
+TIMEWINDOW_MAPPING = {
+    "properties": {
+        "begin": {"type": "date"},  
+        "end":   {"type": "date"},
+    }
+}
+
+GROUPING_RESULT_MAPPINGS = {
+    "properties": {
+        "id":             {"type": "keyword"},
+        "moduleId":       {"type": "keyword"},
+        "smartServiceId": {"type": "keyword"},
+        "costSavings":    {"type": "double"},
+        "timeWindow":     TIMEWINDOW_MAPPING,
+        "groupingMaintenance":   {"type": "object", "dynamic": True},
+        "individualMaintenance": {"type": "object", "dynamic": True},
+        "timestamp":      {"type": "date"},
+    }
+}
+
+THRESHOLD_RESULT_MAPPINGS = {
+    "properties": {
+        "id":             {"type": "keyword"},
+        "moduleId":       {"type": "keyword"},
+        "smartServiceId": {"type": "keyword"},
+        "recommendation": {"type": "text", "analyzer": "standard"},
+        "details":        {"type": "text", "analyzer": "standard"},
+        "timestamp":      {"type": "date"},
+    }
+}
+
+
 
 # Elasticsearch
 ES_HOST = os.getenv("ELASTICSEARCH_URL", "http://elasticsearch:9200")
@@ -343,6 +386,57 @@ def handle_smart_service_event(event, topic, msg):
     logger.info(f"Handling smart service {'assignment' if assign else 'unassignment'} for '{module_id}'")
     update_smart_services(module_id, service_data, assign=assign, event=event, msg=msg)
 
+
+def handle_grouping_predictive_maintenance(event):
+    """
+    payload SewGroupingPredictiveMaintenanceResul
+    """
+    try:
+        create_index_if_missing(GROUPING_INDEX, mappings=GROUPING_RESULT_MAPPINGS)
+
+        doc = {
+            "id":               event.get("id"),
+            "moduleId":         event.get("moduleId"),
+            "smartServiceId":   event.get("smartServiceId"),
+            "costSavings":      event.get("costSavings"),
+            "timeWindow":       event.get("timeWindow"),
+            "groupingMaintenance":   event.get("groupingMaintenance"),
+            "individualMaintenance": event.get("individualMaintenance"),
+            "timestamp":        event.get("timestamp"),
+        }
+
+
+        es.index(index=GROUPING_INDEX, id=doc.get("id"), document=doc)
+        logger.info(f"[ES] Indexed grouping PM result (moduleId={doc.get('moduleId')}) into {GROUPING_INDEX}")
+    except Exception as e:
+        logger.error(f"Failed to index grouping PM result: {e}")
+        logger.debug(f"Payload: {json.dumps(event, indent=2)}")
+
+
+def handle_threshold_predictive_maintenance(event):
+    """
+    Payload SewThresholdBasedPredictiveMaintenanceResult.
+    """
+    try:
+        create_index_if_missing(THRESHOLD_INDEX, mappings=THRESHOLD_RESULT_MAPPINGS)
+
+        doc = {
+            "id":               event.get("id"),
+            "moduleId":         event.get("moduleId"),
+            "smartServiceId":   event.get("smartServiceId"),
+            "recommendation":   event.get("recommendation"),
+            "details":          event.get("details"),
+            "timestamp":        event.get("timestamp"),
+        }
+
+        es.index(index=THRESHOLD_INDEX, id=doc.get("id"), document=doc)
+        logger.info(f"[ES] Indexed threshold PM result (moduleId={doc.get('moduleId')}) into {THRESHOLD_INDEX}")
+    except Exception as e:
+        logger.error(f"Failed to index threshold PM result: {e}")
+        logger.debug(f"Payload: {json.dumps(event, indent=2)}")
+
+
+
 # ---------------------------------
 # FastAPI models & app
 # ---------------------------------
@@ -514,6 +608,66 @@ def delete_process_drift(module_id: str):
         logger.exception("Failed to delete process-drift")
         raise HTTPException(status_code=500, detail=str(e))
 
+def _search_es(index: str, module_id: Optional[str], smart_service_id: Optional[str], from_: int, size: int):
+    must = []
+    if module_id:
+        must.append({"term": {"moduleId": module_id}})
+    if smart_service_id:
+        must.append({"term": {"smartServiceId": smart_service_id}})
+
+    query = {"bool": {"must": must}} if must else {"match_all": {}}
+
+    resp = es.search(
+        index=index,
+        body={
+            "query": query,
+            "from": from_,
+            "size": size,
+            "sort": [{"timestamp": {"order": "desc", "unmapped_type": "date"}}],
+        },
+    )
+    hits = resp.get("hits", {}).get("hits", [])
+    return [{"id": h.get("_id"), **h.get("_source", {})} for h in hits]
+
+
+@app.get("/predictive-maintenance/grouping")
+def get_grouping_results(
+    moduleId: Optional[str] = Query(default=None),
+    smartServiceId: Optional[str] = Query(default=None),
+    from_: int = Query(default=0, ge=0, alias="from"),
+    size: int = Query(default=50, ge=1, le=500),
+):
+    """
+    returns grouping PM results from index sew-grouping-predictive-maintenance-results
+
+    """
+    try:
+        create_index_if_missing(GROUPING_INDEX, mappings=GROUPING_RESULT_MAPPINGS)
+        data = _search_es(GROUPING_INDEX, moduleId, smartServiceId, from_, size)
+        return {"ok": True, "count": len(data), "items": data}
+    except Exception as e:
+        logger.exception("Failed to fetch grouping results")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/predictive-maintenance/threshold")
+def get_threshold_results(
+    moduleId: Optional[str] = Query(default=None),
+    smartServiceId: Optional[str] = Query(default=None),
+    from_: int = Query(default=0, ge=0, alias="from"),
+    size: int = Query(default=50, ge=1, le=500),
+):
+    """
+    returns threshold-based PM results from index sew-threshold-predictive-maintenance-results.
+    """
+    try:
+        create_index_if_missing(THRESHOLD_INDEX, mappings=THRESHOLD_RESULT_MAPPINGS)
+        data = _search_es(THRESHOLD_INDEX, moduleId, smartServiceId, from_, size)
+        return {"ok": True, "count": len(data), "items": data}
+    except Exception as e:
+        logger.exception("Failed to fetch threshold results")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 
 # ---------------------------------
@@ -548,6 +702,10 @@ def kafka_loop():
                             handle_module_deletion(event)
                         elif topic in ["smart-service-assigned", "smart-service-unassigned"]:
                             handle_smart_service_event(event, topic, record)
+                        elif topic == GROUPING_TOPIC:
+                             handle_grouping_predictive_maintenance(event)
+                        elif topic == THRESHOLD_TOPIC:
+                            handle_threshold_predictive_maintenance(event)
                         elif topic == "base64-input-events":
                             logger.info("Handling base64 encoded input...")
                             decode_base64_event(event)
