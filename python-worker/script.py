@@ -19,7 +19,7 @@ except Exception:
 from elasticsearch import Elasticsearch, NotFoundError
 
 # --- HTTP API ---
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, conint, confloat
 
