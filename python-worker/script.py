@@ -8,6 +8,8 @@ import signal
 import time
 from typing import Literal, Optional
 from datetime import datetime
+import re
+import uuid
 
 try:
     from kafka import KafkaConsumer, KafkaProducer
@@ -195,6 +197,39 @@ def find_document_by_module_id(module_id, index_name=ES_INDEX):
         logger.error(f"Error searching moduleId '{module_id}': {e}")
         return None, None
 
+
+# Generic Handlers 
+def _to_camel_key(s: str) -> str:
+    """'Time window' -> 'timeWindow'."""
+    if not isinstance(s, str):
+        return s
+    tokens = re.split(r'[\s_]+', s.strip())
+    if not tokens:
+        return s
+    head = tokens[0].lower()
+    tail = [t.capitalize() for t in tokens[1:]]
+    return head + "".join(tail)
+
+def _normalize_keys(obj):
+    """
+   dict to camelCase.
+    """
+    if isinstance(obj, dict):
+        out = {}
+        for k, v in obj.items():
+            nk = _to_camel_key(k)
+            out[nk] = _normalize_keys(v)
+        return out
+    elif isinstance(obj, list):
+        return [_normalize_keys(x) for x in obj]
+    else:
+        return obj
+
+def _iso_or_none(ts):
+    """ISO8601 string or None """
+    return ts if ts else None
+
+
 # ---------------------------------
 # Mappings 
 # ---------------------------------
@@ -224,6 +259,7 @@ PROCESS_DRIFT_MAPPINGS = {
         "source": {"type": "keyword"}  # 'eds'
     }
 }
+
 
 
 
@@ -386,51 +422,101 @@ def handle_smart_service_event(event, topic, msg):
     logger.info(f"Handling smart service {'assignment' if assign else 'unassignment'} for '{module_id}'")
     update_smart_services(module_id, service_data, assign=assign, event=event, msg=msg)
 
-
 def handle_grouping_predictive_maintenance(event):
-    """
-    payload SewGroupingPredictiveMaintenanceResul
-    """
+
     try:
         create_index_if_missing(GROUPING_INDEX, mappings=GROUPING_RESULT_MAPPINGS)
 
+        # root fields
+        module_id = event.get("module") or event.get("moduleId")
+        smart_service_id = event.get("smartService") or event.get("smartServiceId")
+        evt_ts = _iso_or_none(event.get("timestamp"))
+
+        # normalize 'results'
+        raw_results = event.get("results") or {}
+        nres = _normalize_keys(raw_results)
+
+        cost_savings = nres.get("costSavings")
+        grouping_maint = nres.get("groupingMaintenance")
+        individual_maint = nres.get("individualMaintenance")
+
+        tw = nres.get("timeWindow") or {}
+        time_window = {
+            "begin": _iso_or_none(tw.get("begin")),
+            "end": _iso_or_none(tw.get("end")),
+        } if tw else None
+
+        # id: from event if exists; else compose one (moduleId-timestamp) or uuid
+        doc_id = event.get("id")
+        if not doc_id:
+            base = f"{module_id}-{evt_ts}" if module_id and evt_ts else str(uuid.uuid4())
+            doc_id = re.sub(r'[^a-zA-Z0-9_\-:.]', '_', base)
+
         doc = {
-            "id":               event.get("id"),
-            "moduleId":         event.get("moduleId"),
-            "smartServiceId":   event.get("smartServiceId"),
-            "costSavings":      event.get("costSavings"),
-            "timeWindow":       event.get("timeWindow"),
-            "groupingMaintenance":   event.get("groupingMaintenance"),
-            "individualMaintenance": event.get("individualMaintenance"),
-            "timestamp":        event.get("timestamp"),
+            "id":                   doc_id,
+            "moduleId":             module_id,
+            "smartServiceId":       smart_service_id,
+            "costSavings":          cost_savings,
+            "timeWindow":           time_window,
+            "groupingMaintenance":  grouping_maint,
+            "individualMaintenance": individual_maint,
+            "timestamp":            evt_ts,
+
+            # optional debug metadata (μπορείς να αφαιρέσεις αν δεν το θες)
+            "sourceRaw": {
+                "description": event.get("description"),
+                "priority": event.get("priority"),
+                "eventType": event.get("eventType"),
+                "sourceComponent": event.get("sourceComponent"),
+                "topic": event.get("topic"),
+            }
         }
 
+        logger.info(f"[KAFKA-INP][GROUPING] module={module_id} smartService={smart_service_id} ts={evt_ts}")
+        logger.info(f"[KAFKA-INP][GROUPING] {event}")
 
-        es.index(index=GROUPING_INDEX, id=doc.get("id"), document=doc)
-        logger.info(f"[ES] Indexed grouping PM result (moduleId={doc.get('moduleId')}) into {GROUPING_INDEX}")
+        es.index(index=GROUPING_INDEX, id=doc_id, document=doc, refresh="wait_for")
+        logger.info(f"[ES] Indexed grouping PM result (moduleId={module_id}) into {GROUPING_INDEX}")
     except Exception as e:
         logger.error(f"Failed to index grouping PM result: {e}")
         logger.debug(f"Payload: {json.dumps(event, indent=2)}")
 
 
-def handle_threshold_predictive_maintenance(event):
-    """
-    Payload SewThresholdBasedPredictiveMaintenanceResult.
-    """
+def handle_threshold_predictive_maintenance(event):   
     try:
         create_index_if_missing(THRESHOLD_INDEX, mappings=THRESHOLD_RESULT_MAPPINGS)
 
+        results = event.get("results") or {}
+        module_id = results.get("moduleId") or event.get("module")
+        smart_service_id = results.get("smartServiceId") or event.get("smartService")
+        rec = results.get("recommendation")
+        details = results.get("details")
+        ts = _iso_or_none(results.get("timestamp") or event.get("timestamp"))
+
+        doc_id = event.get("id") or (f"{module_id}-{ts}" if module_id and ts else str(uuid.uuid4()))
+        doc_id = re.sub(r'[^a-zA-Z0-9_\-:.]', '_', doc_id)
+
         doc = {
-            "id":               event.get("id"),
-            "moduleId":         event.get("moduleId"),
-            "smartServiceId":   event.get("smartServiceId"),
-            "recommendation":   event.get("recommendation"),
-            "details":          event.get("details"),
-            "timestamp":        event.get("timestamp"),
+            "id":               doc_id,
+            "moduleId":         module_id,
+            "smartServiceId":   smart_service_id,
+            "recommendation":   rec,
+            "details":          details,
+            "timestamp":        ts,
+            "sourceRaw": {
+                "description": event.get("description"),
+                "priority": event.get("priority"),
+                "eventType": event.get("eventType"),
+                "sourceComponent": event.get("sourceComponent"),
+                "topic": event.get("topic"),
+            }
         }
 
-        es.index(index=THRESHOLD_INDEX, id=doc.get("id"), document=doc)
-        logger.info(f"[ES] Indexed threshold PM result (moduleId={doc.get('moduleId')}) into {THRESHOLD_INDEX}")
+        logger.info(f"[KAFKA-INP][THRESHOLD] module={module_id} smartService={smart_service_id} ts={ts}")
+        logger.info(f"[KAFKA-INP][THRESHOLD] {event}")
+
+        es.index(index=THRESHOLD_INDEX, id=doc_id, document=doc, refresh="wait_for")
+        logger.info(f"[ES] Indexed threshold PM result (moduleId={module_id}) into {THRESHOLD_INDEX}")
     except Exception as e:
         logger.error(f"Failed to index threshold PM result: {e}")
         logger.debug(f"Payload: {json.dumps(event, indent=2)}")
@@ -492,121 +578,6 @@ def healthz():
         "time": datetime.utcnow().isoformat() + "Z",
     }
 
-@app.post("/process-drift")
-def process_drift(payload: DriftPayload):
-    """Upsert by moduleId στο index 'process_drift'."""
-    try:
-        create_index_if_missing(PROCESS_DRIFT_INDEX, mappings=PROCESS_DRIFT_MAPPINGS)
-
-        endtime_val = payload.endtime if payload.endtime else None
-        doc = {
-            "moduleId": payload.moduleId,
-            "module": payload.module,
-            "component": payload.component,
-            "stage": payload.stage,
-            "cell": payload.cell,
-            "failureType": payload.failureType,
-            "failureDescription": payload.failureDescription,
-            "maintenanceAction": payload.maintenanceAction,
-            "componentReplacement": payload.componentReplacement,
-            "workerName": payload.workerName,
-            "driftDone": payload.driftDone,
-            "timestamp": payload.timestamp,
-            "timestamp_api_received": datetime.utcnow().isoformat() + "Z",
-            "starttime": payload.starttime,
-            "endtime": endtime_val,
-            "source": "eds",
-        }
-
-        res = es.update(
-            index=PROCESS_DRIFT_INDEX,
-            id=payload.moduleId,
-            body={"doc": doc, "doc_as_upsert": True},
-            refresh="wait_for",
-        )
-        return {"ok": True, "result": res.get("result")}
-    except Exception as e:
-        logger.exception("Failed to upsert process-drift")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-
-@app.get("/process-drift/{module_id}")
-def get_process_drift_by_module(module_id: str):
-    """id=module_id. fallback to search."""
-    try:
-        create_index_if_missing(PROCESS_DRIFT_INDEX, mappings=PROCESS_DRIFT_MAPPINGS)
-
-        try:
-            hit = es.get(index=PROCESS_DRIFT_INDEX, id=module_id)
-            return {"ok": True, "id": hit["_id"], "source": hit["_source"]}
-        except NotFoundError:
-            pass  # fallback
-
-        es_query = {
-            "bool": {
-                "should": [
-                    {"term": {"moduleId": module_id}},
-                    {"term": {"moduleId.keyword": module_id}},
-                    {"match_phrase": {"moduleId": module_id}},
-                ],
-                "minimum_should_match": 1,
-            }
-        }
-        resp = es.search(
-            index=PROCESS_DRIFT_INDEX,
-            query=es_query,
-            size=1,
-            sort=[
-                {"timestamp_api_received": {"order": "desc", "unmapped_type": "date"}},
-                {"timestamp": {"order": "desc", "unmapped_type": "date"}},
-            ],
-        )
-        hits = resp.get("hits", {}).get("hits", [])
-        if not hits:
-            raise HTTPException(status_code=404, detail="404: No process-drift found for moduleId")
-
-        hit = hits[0]
-        return {"ok": True, "id": hit["_id"], "source": hit["_source"]}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.exception("Failed to read process-drift")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.delete("/process-drift/{module_id}")
-def delete_process_drift(module_id: str):
-    """delete declared drift (id=moduleId). Fallback delete_by_query"""
-    try:
-        create_index_if_missing(PROCESS_DRIFT_INDEX, mappings=PROCESS_DRIFT_MAPPINGS)
-
-        try:
-            res = es.delete(index=PROCESS_DRIFT_INDEX, id=module_id, refresh="wait_for")
-            return {"ok": True, "result": "deleted", "by": "id"}
-        except NotFoundError:
-            pass
-
-        es_query = {
-            "bool": {
-                "should": [
-                    {"term": {"moduleId": module_id}},
-                    {"term": {"moduleId.keyword": module_id}},
-                    {"match_phrase": {"moduleId": module_id}},
-                ],
-                "minimum_should_match": 1,
-            }
-        }
-        res = es.delete_by_query(index=PROCESS_DRIFT_INDEX, body={"query": es_query}, refresh=True)
-        deleted = res.get("deleted", 0)
-        if deleted == 0:
-            raise HTTPException(status_code=404, detail="404: No process-drift found to delete for moduleId")
-        return {"ok": True, "result": "deleted", "by": "query", "deleted_count": deleted}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.exception("Failed to delete process-drift")
-        raise HTTPException(status_code=500, detail=str(e))
 
 def _search_es(index: str, module_id: Optional[str], smart_service_id: Optional[str], from_: int, size: int):
     must = []
@@ -629,44 +600,6 @@ def _search_es(index: str, module_id: Optional[str], smart_service_id: Optional[
     hits = resp.get("hits", {}).get("hits", [])
     return [{"id": h.get("_id"), **h.get("_source", {})} for h in hits]
 
-
-@app.get("/predictive-maintenance/grouping")
-def get_grouping_results(
-    moduleId: Optional[str] = Query(default=None),
-    smartServiceId: Optional[str] = Query(default=None),
-    from_: int = Query(default=0, ge=0, alias="from"),
-    size: int = Query(default=50, ge=1, le=500),
-):
-    """
-    returns grouping PM results from index sew-grouping-predictive-maintenance-results
-
-    """
-    try:
-        create_index_if_missing(GROUPING_INDEX, mappings=GROUPING_RESULT_MAPPINGS)
-        data = _search_es(GROUPING_INDEX, moduleId, smartServiceId, from_, size)
-        return {"ok": True, "count": len(data), "items": data}
-    except Exception as e:
-        logger.exception("Failed to fetch grouping results")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/predictive-maintenance/threshold")
-def get_threshold_results(
-    moduleId: Optional[str] = Query(default=None),
-    smartServiceId: Optional[str] = Query(default=None),
-    from_: int = Query(default=0, ge=0, alias="from"),
-    size: int = Query(default=50, ge=1, le=500),
-):
-    """
-    returns threshold-based PM results from index sew-threshold-predictive-maintenance-results.
-    """
-    try:
-        create_index_if_missing(THRESHOLD_INDEX, mappings=THRESHOLD_RESULT_MAPPINGS)
-        data = _search_es(THRESHOLD_INDEX, moduleId, smartServiceId, from_, size)
-        return {"ok": True, "count": len(data), "items": data}
-    except Exception as e:
-        logger.exception("Failed to fetch threshold results")
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 
