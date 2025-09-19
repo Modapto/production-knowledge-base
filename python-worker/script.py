@@ -72,7 +72,6 @@ TIMEWINDOW_MAPPING = {
 
 GROUPING_RESULT_MAPPINGS = {
     "properties": {
-        "id":             {"type": "keyword"},
         "moduleId":       {"type": "keyword"},
         "smartServiceId": {"type": "keyword"},
         "costSavings":    {"type": "double"},
@@ -85,7 +84,6 @@ GROUPING_RESULT_MAPPINGS = {
 
 THRESHOLD_RESULT_MAPPINGS = {
     "properties": {
-        "id":             {"type": "keyword"},
         "moduleId":       {"type": "keyword"},
         "smartServiceId": {"type": "keyword"},
         "recommendation": {"type": "text", "analyzer": "standard"},
@@ -447,13 +445,12 @@ def handle_grouping_predictive_maintenance(event):
         } if tw else None
 
         # id: from event if exists; else compose one (moduleId-timestamp) or uuid
-        doc_id = event.get("id")
-        if not doc_id:
-            base = f"{module_id}-{evt_ts}" if module_id and evt_ts else str(uuid.uuid4())
-            doc_id = re.sub(r'[^a-zA-Z0-9_\-:.]', '_', base)
+        # doc_id = event.get("id")
+        # if not doc_id:
+        #     base = f"{module_id}-{evt_ts}" if module_id and evt_ts else str(uuid.uuid4())
+        #     doc_id = re.sub(r'[^a-zA-Z0-9_\-:.]', '_', base)
 
         doc = {
-            "id":                   doc_id,
             "moduleId":             module_id,
             "smartServiceId":       smart_service_id,
             "costSavings":          cost_savings,
@@ -475,7 +472,7 @@ def handle_grouping_predictive_maintenance(event):
         logger.info(f"[KAFKA-INP][GROUPING] module={module_id} smartService={smart_service_id} ts={evt_ts}")
         logger.info(f"[KAFKA-INP][GROUPING] {event}")
 
-        es.index(index=GROUPING_INDEX, id=doc_id, document=doc, refresh="wait_for")
+        es.index(index=GROUPING_INDEX, document=doc, refresh="wait_for")
         logger.info(f"[ES] Indexed grouping PM result (moduleId={module_id}) into {GROUPING_INDEX}")
     except Exception as e:
         logger.error(f"Failed to index grouping PM result: {e}")
@@ -493,11 +490,10 @@ def handle_threshold_predictive_maintenance(event):
         details = results.get("details")
         ts = _iso_or_none(results.get("timestamp") or event.get("timestamp"))
 
-        doc_id = event.get("id") or (f"{module_id}-{ts}" if module_id and ts else str(uuid.uuid4()))
-        doc_id = re.sub(r'[^a-zA-Z0-9_\-:.]', '_', doc_id)
+        # doc_id = event.get("id") or (f"{module_id}-{ts}" if module_id and ts else str(uuid.uuid4()))
+        # doc_id = re.sub(r'[^a-zA-Z0-9_\-:.]', '_', doc_id)
 
         doc = {
-            "id":               doc_id,
             "moduleId":         module_id,
             "smartServiceId":   smart_service_id,
             "recommendation":   rec,
@@ -515,7 +511,7 @@ def handle_threshold_predictive_maintenance(event):
         logger.info(f"[KAFKA-INP][THRESHOLD] module={module_id} smartService={smart_service_id} ts={ts}")
         logger.info(f"[KAFKA-INP][THRESHOLD] {event}")
 
-        es.index(index=THRESHOLD_INDEX, id=doc_id, document=doc, refresh="wait_for")
+        es.index(index=THRESHOLD_INDEX, document=doc, refresh="wait_for")
         logger.info(f"[ES] Indexed threshold PM result (moduleId={module_id}) into {THRESHOLD_INDEX}")
     except Exception as e:
         logger.error(f"Failed to index threshold PM result: {e}")
