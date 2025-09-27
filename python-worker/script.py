@@ -21,7 +21,9 @@ except Exception:
 from elasticsearch import Elasticsearch, NotFoundError
 
 # --- HTTP API ---
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, UploadFile, File, Path
+
+from fastapi import Body
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, conint, confloat
 
@@ -47,6 +49,10 @@ THRESHOLD_TOPIC = "threshold-predictive-maintenance"
 GROUPING_INDEX = "sew-grouping-predictive-maintenance-results"
 THRESHOLD_INDEX = "sew-threshold-predictive-maintenance-results"
 
+PROD_OPT_TOPIC = "production-schedule-optimization"
+PROD_OPT_INDEX = "production-schedule-optimization-results"
+
+
 # Kafka
 KAFKA_BROKER = os.getenv("KAFKA_URL", "kafka:9092")
 TOPICS = [
@@ -58,6 +64,7 @@ TOPICS = [
     "base64-input-events",
     GROUPING_TOPIC,
     THRESHOLD_TOPIC,
+    PROD_OPT_TOPIC
 ]
 TARGET_TOPIC = "aegis-test"
 
@@ -69,6 +76,33 @@ TIMEWINDOW_MAPPING = {
         "end":   {"type": "date"},
     }
 }
+
+# Indices for P3 Opt and Sim
+OPT_CONFIG_INDEX = "kitting-configs-opt"
+SIM_CONFIG_INDEX = "kitting-configs-sim"
+
+CONFIG_MAPPINGS = {
+    "properties": {
+        "filename":   {"type": "keyword"},
+        "uploadedAt": {"type": "date"},
+        "rawText":    {"type": "text"},      # JSON string 
+        "config":     {"type": "object"},    # parsed JSON 
+        "case":       {"type": "keyword"},   # 'opt' or 'sim'
+        "etag":       {"type": "keyword"}    # hash for idempotency 
+    }
+}
+
+PROD_OPT_RESULT_MAPPINGS = {
+    "properties": {
+        "timestamp":  {"type": "keyword"},   # string timestamps, όπως στο schema
+        "moduleId":   {"type": "keyword"},
+        "data":       {"type": "object", "dynamic": True},
+        "smartServiceId": {"type": "keyword"},
+        "sourceRaw":  {"type": "object", "dynamic": True},
+    }
+}
+
+MAX_UPLOAD_SIZE = 10 * 1024 * 1024  # 10 MB
 
 GROUPING_RESULT_MAPPINGS = {
     "properties": {
@@ -198,7 +232,7 @@ def find_document_by_module_id(module_id, index_name=ES_INDEX):
 
 # Generic Handlers 
 def _to_camel_key(s: str) -> str:
-    """'Time window' -> 'timeWindow'."""
+
     if not isinstance(s, str):
         return s
     tokens = re.split(r'[\s_]+', s.strip())
@@ -209,9 +243,8 @@ def _to_camel_key(s: str) -> str:
     return head + "".join(tail)
 
 def _normalize_keys(obj):
-    """
-   dict to camelCase.
-    """
+   
+   
     if isinstance(obj, dict):
         out = {}
         for k, v in obj.items():
@@ -224,8 +257,44 @@ def _normalize_keys(obj):
         return obj
 
 def _iso_or_none(ts):
-    """ISO8601 string or None """
+
     return ts if ts else None
+
+
+def handle_production_schedule_optimization(event):
+   
+   
+    try:
+        create_index_if_missing(PROD_OPT_INDEX, mappings=PROD_OPT_RESULT_MAPPINGS)
+
+        payload = event.get("results") or event or {}
+
+        module_id = payload.get("moduleId") or event.get("module") or event.get("moduleId")
+        smart_service_id = payload.get("smartServiceId") or event.get("smartService") or event.get("smartServiceId")
+        ts = payload.get("timestamp") or event.get("timestamp")
+        data = payload.get("data") or {}   # solutions map
+
+
+        doc = {
+            "moduleId":       module_id,
+            "smartServiceId": smart_service_id,
+            "timestamp":      ts,
+            "data":           data,
+            "sourceRaw": {
+                "description": event.get("description"),
+                "priority": event.get("priority"),
+                "eventType": event.get("eventType"),
+                "sourceComponent": event.get("sourceComponent"),
+                "topic": "production-schedule-optimization",
+            }
+        }
+
+        logger.info(f"[KAFKA-INP][SEW-OPT] module={module_id} ts={ts}")
+        es.index(index=PROD_OPT_INDEX, document=doc, refresh="wait_for")
+        logger.info(f"[ES] Indexed SEW optimization result into '{PROD_OPT_INDEX}' (id={doc_id})")
+    except Exception as e:
+        logger.error(f"Failed to index SEW optimization result: {e}")
+        logger.debug(f"Payload: {json.dumps(event, indent=2)}")
 
 
 # ---------------------------------
@@ -237,7 +306,7 @@ PROCESS_DRIFT_MAPPINGS = {
         "module": {"type": "keyword"},    
         "component": {"type": "keyword"},
 
-        # UI form 
+
         "stage": {"type": "keyword"},
         "cell": {"type": "keyword"},
         "failureType": {"type": "keyword"},
@@ -247,13 +316,13 @@ PROCESS_DRIFT_MAPPINGS = {
         "workerName": {"type": "keyword"},
         "driftDone": {"type": "boolean"},
 
-        # Timestamps
+
         "timestamp": {"type": "date"},               # event timestamp UI
         "timestamp_api_received": {"type": "date"},  # server-side
         "starttime": {"type": "date"},               # moment START declared
         "endtime": {"type": "date"},                 # moment DONE toggled
 
-        # Meta
+
         "source": {"type": "keyword"}  # 'eds'
     }
 }
@@ -425,12 +494,10 @@ def handle_grouping_predictive_maintenance(event):
     try:
         create_index_if_missing(GROUPING_INDEX, mappings=GROUPING_RESULT_MAPPINGS)
 
-        # root fields
         module_id = event.get("module") or event.get("moduleId")
         smart_service_id = event.get("smartService") or event.get("smartServiceId")
         evt_ts = _iso_or_none(event.get("timestamp"))
 
-        # normalize 'results'
         raw_results = event.get("results") or {}
         nres = _normalize_keys(raw_results)
 
@@ -444,12 +511,6 @@ def handle_grouping_predictive_maintenance(event):
             "end": _iso_or_none(tw.get("end")),
         } if tw else None
 
-        # id: from event if exists; else compose one (moduleId-timestamp) or uuid
-        # doc_id = event.get("id")
-        # if not doc_id:
-        #     base = f"{module_id}-{evt_ts}" if module_id and evt_ts else str(uuid.uuid4())
-        #     doc_id = re.sub(r'[^a-zA-Z0-9_\-:.]', '_', base)
-
         doc = {
             "moduleId":             module_id,
             "smartServiceId":       smart_service_id,
@@ -459,7 +520,6 @@ def handle_grouping_predictive_maintenance(event):
             "individualMaintenance": individual_maint,
             "timestamp":            evt_ts,
 
-            # optional debug metadata (μπορείς να αφαιρέσεις αν δεν το θες)
             "sourceRaw": {
                 "description": event.get("description"),
                 "priority": event.get("priority"),
@@ -490,9 +550,7 @@ def handle_threshold_predictive_maintenance(event):
         details = results.get("details")
         ts = _iso_or_none(results.get("timestamp") or event.get("timestamp"))
 
-        # doc_id = event.get("id") or (f"{module_id}-{ts}" if module_id and ts else str(uuid.uuid4()))
-        # doc_id = re.sub(r'[^a-zA-Z0-9_\-:.]', '_', doc_id)
-
+       
         doc = {
             "moduleId":         module_id,
             "smartServiceId":   smart_service_id,
@@ -517,6 +575,37 @@ def handle_threshold_predictive_maintenance(event):
         logger.error(f"Failed to index threshold PM result: {e}")
         logger.debug(f"Payload: {json.dumps(event, indent=2)}")
 
+
+
+# Upload File for PKB Conf
+def _case_to_index(case: str) -> str:
+    case = (case or "").lower()
+    if case == "opt":
+        return OPT_CONFIG_INDEX
+    if case == "sim":
+        return SIM_CONFIG_INDEX
+    raise HTTPException(status_code=400, detail="case must be 'opt' or 'sim'")
+
+def _ensure_config_index(index_name: str):
+    create_index_if_missing(index_name, mappings=CONFIG_MAPPINGS)
+
+def _summarize_config(parsed: dict):
+    try:
+        containers_obj = parsed.get("containers_opt") or parsed.get("containers_sim") or {}
+        kit_holders_obj = parsed.get("kit_holders_opt") or parsed.get("kit_holders_sim") or {}
+        distance_list = parsed.get("distance_matrix_opt") or parsed.get("distance_matrix_sim") or []
+
+        containers = len(containers_obj) if isinstance(containers_obj, dict) else None
+        kit_holders = len(kit_holders_obj) if isinstance(kit_holders_obj, dict) else None
+        distance_edges = len(distance_list) if isinstance(distance_list, list) else None
+
+        return {
+            "containers": containers,
+            "kitHolders": kit_holders,
+            "distanceEdges": distance_edges,
+        }
+    except Exception:
+        return {}
 
 
 # ---------------------------------
@@ -596,6 +685,71 @@ def _search_es(index: str, module_id: Optional[str], smart_service_id: Optional[
     hits = resp.get("hits", {}).get("hits", [])
     return [{"id": h.get("_id"), **h.get("_source", {})} for h in hits]
 
+def _case_doc_id(case: str) -> str:
+    case = (case or "").lower()
+    if case not in ("opt", "sim"):
+        raise HTTPException(status_code=400, detail="case must be 'opt' or 'sim'")
+    return f"{case}-current"
+
+
+@app.post("/config/upload/{case}")
+async def upload_config_file_case(
+    case: str = Path(..., description="Either 'opt' or 'sim'"),
+    file: UploadFile = File(...),
+):
+    if not file.filename.lower().endswith(".json"):
+        raise HTTPException(status_code=400, detail="Only .json files are accepted")
+
+    raw = await file.read()
+    if len(raw) > MAX_UPLOAD_SIZE:
+        raise HTTPException(status_code=413, detail="File too large")
+
+    raw_text = raw.decode("utf-8", errors="replace")
+
+    import hashlib
+    etag = hashlib.sha256(raw).hexdigest()
+
+    try:
+        parsed = json.loads(raw_text)
+    except Exception:
+        parsed = None  
+
+    index_name = _case_to_index(case)
+    _ensure_config_index(index_name)
+
+    doc = {
+        "filename": file.filename,
+        "uploadedAt": datetime.utcnow().isoformat() + "Z",
+        "rawText": raw_text,
+        "config": parsed if isinstance(parsed, dict) else None,
+        "case": case,
+        "etag": etag,
+    }
+
+    try:
+        es.index(index=index_name, id=_case_doc_id(case), document=doc, refresh="wait_for")
+    except Exception as e:
+        logger.error(f"Failed to index config ({case}): {e}")
+        raise HTTPException(status_code=500, detail="Failed to store config")
+
+    summary = _summarize_config(parsed or {})
+    return {"ok": True, "case": case, "filename": file.filename, "summary": summary, "id": etag}
+
+
+
+@app.get("/config/current/{case}")
+def get_current_config(case: str = Path(..., description="Either 'opt' or 'sim'")):
+    index_name = _case_to_index(case)
+    doc_id = _case_doc_id(case)
+    try:
+        res = es.get(index=index_name, id=doc_id)
+        return {"ok": True, "case": case, "document": res["_source"], "id": doc_id}
+    except NotFoundError:
+        raise HTTPException(status_code=404, detail="No current config found")
+
+
+
+
 
 
 
@@ -638,6 +792,10 @@ def kafka_loop():
                         elif topic == "base64-input-events":
                             logger.info("Handling base64 encoded input...")
                             decode_base64_event(event)
+                        elif topic == PROD_OPT_TOPIC:
+                            logger.info("Handling optimization sew output...")
+                            handle_production_schedule_optimization(event)
+
                         else:
                             logger.warning(f"Unknown topic received: '{topic}'")
                         logger.info(f"[Kafka] processed from '{topic}'")
