@@ -50,7 +50,10 @@ GROUPING_INDEX = "sew-grouping-predictive-maintenance-results"
 THRESHOLD_INDEX = "sew-threshold-predictive-maintenance-results"
 
 PROD_OPT_TOPIC = "production-schedule-optimization"
-PROD_OPT_INDEX = "production-schedule-optimization-results"
+PROD_OPT_INDEX = "optimization-sew"
+
+CRF_SA_TOPIC = "self-awareness-wear-detection"
+CRF_SA_INDEX = "kitholder-event-results-crf"
 
 
 # Kafka
@@ -64,7 +67,8 @@ TOPICS = [
     "base64-input-events",
     GROUPING_TOPIC,
     THRESHOLD_TOPIC,
-    PROD_OPT_TOPIC
+    PROD_OPT_TOPIC,
+    CRF_SA_TOPIC
 ]
 TARGET_TOPIC = "aegis-test"
 
@@ -91,6 +95,24 @@ CONFIG_MAPPINGS = {
         "etag":       {"type": "keyword"}    # hash for idempotency 
     }
 }
+
+CRF_SA_MAPPINGS = {
+    "properties": {
+        "moduleId":       {"type": "keyword"},
+        "smartServiceId": {"type": "keyword"},
+        "pilot":          {"type": "keyword"},
+        "priority":       {"type": "keyword"},
+        "eventType":      {"type": "keyword"},   
+        "resultEventType":{"type": "integer"},  
+        "rfidStation":    {"type": "integer"},
+        "khType":         {"type": "integer"},
+        "khId":           {"type": "integer"},
+        "timestamp":      {"type": "date"},      
+        "description":    {"type": "text"},
+        "sourceRaw":      {"type": "object", "dynamic": True}
+    }
+}
+
 
 PROD_OPT_RESULT_MAPPINGS = {
     "properties": {
@@ -291,7 +313,7 @@ def handle_production_schedule_optimization(event):
 
         logger.info(f"[KAFKA-INP][SEW-OPT] module={module_id} ts={ts}")
         es.index(index=PROD_OPT_INDEX, document=doc, refresh="wait_for")
-        logger.info(f"[ES] Indexed SEW optimization result into '{PROD_OPT_INDEX}' (id={doc_id})")
+        logger.info(f"[ES] Indexed SEW optimization result into '{PROD_OPT_INDEX}'")
     except Exception as e:
         logger.error(f"Failed to index SEW optimization result: {e}")
         logger.debug(f"Payload: {json.dumps(event, indent=2)}")
@@ -576,6 +598,42 @@ def handle_threshold_predictive_maintenance(event):
         logger.debug(f"Payload: {json.dumps(event, indent=2)}")
 
 
+def handle_crf_sa_wear_detection_event(event):
+
+    try:
+        create_index_if_missing(CRF_SA_INDEX, mappings=CRF_SA_MAPPINGS)
+
+        results = event.get("results") or {}
+
+        ts = results.get("timestamp") or event.get("timestamp")
+        ts = _iso_or_none(ts)
+
+        doc = {
+            "moduleId":        event.get("module"),
+            "smartServiceId":  event.get("smartService"),
+            "pilot":           event.get("pilot"),
+            "priority":        event.get("priority"),
+            "eventType":       event.get("eventType"),            
+            "resultEventType": results.get("eventType"),         
+            "rfidStation":     results.get("rfidStation"),
+            "khType":          results.get("khType"),
+            "khId":            results.get("khId"),
+            "timestamp":       ts,
+            "description":     event.get("description"),
+            "sourceRaw": {
+                "topic": event.get("topic") or CRF_SA_TOPIC,
+            },
+        }
+
+        logger.info(f"[KAFKA-INP][WEAR] module={doc.get('moduleId')} smartService={doc.get('smartServiceId')} ts={ts}")
+        logger.debug(f"[KAFKA-INP][WEAR] payload: {json.dumps(event, indent=2)}")
+
+        es.index(index=CRF_SA_INDEX, document=doc, refresh="wait_for")
+        logger.info(f"[ES] Indexed wear detection event into '{CRF_SA_INDEX}'")
+    except Exception as e:
+        logger.error(f"Failed to index wear detection event: {e}")
+        logger.debug(f"Payload: {json.dumps(event, indent=2)}")
+
 
 # Upload File for PKB Conf
 def _case_to_index(case: str) -> str:
@@ -795,7 +853,9 @@ def kafka_loop():
                         elif topic == PROD_OPT_TOPIC:
                             logger.info("Handling optimization sew output...")
                             handle_production_schedule_optimization(event)
-
+                        elif topic == CRF_SA_TOPIC:
+                            logger.info("Handling self-awareness wear detection...")
+                            handle_crf_sa_wear_detection_event(event)
                         else:
                             logger.warning(f"Unknown topic received: '{topic}'")
                         logger.info(f"[Kafka] processed from '{topic}'")
