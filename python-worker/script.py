@@ -44,16 +44,32 @@ RUN_MODE = os.getenv("RUN_MODE", "both").lower()  # 'api' | 'kafka' | 'both'
 FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "*")
 
 GROUPING_TOPIC = "grouping-predictive-maintenance"
-THRESHOLD_TOPIC = "threshold-predictive-maintenance"
-
 GROUPING_INDEX = "sew-grouping-predictive-maintenance-results"
+
+THRESHOLD_TOPIC = "threshold-predictive-maintenance"
 THRESHOLD_INDEX = "sew-threshold-predictive-maintenance-results"
+
+MQTT_TOPIC = "modapto-mqtt-topics"
+# to key tou einai to previous topic
 
 PROD_OPT_TOPIC = "production-schedule-optimization"
 PROD_OPT_INDEX = "optimization-sew"
 
 CRF_SA_TOPIC = "self-awareness-wear-detection"
 CRF_SA_INDEX = "kitholder-event-results-crf"
+
+SA1_KPIS_TOPIC = "self-awareness-monitor-kpis"
+SA1_KPIS_INDEX = "sew-self-awareness-monitoring-kpis"
+
+SA2_MONITORING_TOPIC = "self-awareness-real-time-monitoring"
+SA2_MONITORING_INDEX = "sew-self-awareness-real-time-monitoring-results"
+
+CRF_OPT_TOPIC = "kh-picking-sequence-optimization"
+CRF_OPT_INDEX = "optimization-crf"
+
+CRF_SIM_TOPIC = "kh-picking-sequence-simulation"
+CRF_SIM_INDEX = "simulation-crf"
+
 
 
 # Kafka
@@ -68,7 +84,10 @@ TOPICS = [
     GROUPING_TOPIC,
     THRESHOLD_TOPIC,
     PROD_OPT_TOPIC,
-    CRF_SA_TOPIC
+    CRF_SA_TOPIC,
+    SA1_KPIS_TOPIC,
+    SA2_MONITORING_TOPIC,
+    MQTT_TOPIC,
 ]
 TARGET_TOPIC = "aegis-test"
 
@@ -114,6 +133,43 @@ CRF_SA_MAPPINGS = {
 }
 
 
+SA1_KPIS_MAPPINGS = {
+    "properties": {
+        "smartServiceId": {"type": "keyword"},
+        "moduleId": {"type": "keyword"},
+        "timestamp": {"type": "date"},         
+        "stage": {"type": "keyword"},
+        "cell": {"type": "keyword"},
+        "plc": {"type": "keyword"},
+        "module": {"type": "keyword"},
+        "subElement": {"type": "keyword"},
+        "component": {"type": "keyword"},
+        "variable": {"type": "keyword"},
+        "variableType": {"type": "keyword"},
+        "startingDate": {"type": "keyword"},    
+        "endingDate": {"type": "keyword"},     
+        "dataSource": {"type": "keyword"},
+        "bucket": {"type": "keyword"},
+        "data": {"type": "float"}              
+    }
+}
+
+
+SA2_MONITORING_MAPPINGS = {
+    "properties": {
+        "timestamp": {"type": "date"},
+        "moduleId": {"type": "keyword"},
+        "module": {"type": "keyword"},
+        "component": {"type": "keyword"},
+        "property": {"type": "keyword"},
+        "value": {"type": "keyword"},             # string, όπως στο index model
+        "lowThreshold": {"type": "double"},
+        "highThreshold": {"type": "double"},
+        "deviationPercentage": {"type": "double"},
+    }
+}
+
+
 PROD_OPT_RESULT_MAPPINGS = {
     "properties": {
         "timestamp":  {"type": "keyword"},   # string timestamps, όπως στο schema
@@ -137,6 +193,34 @@ GROUPING_RESULT_MAPPINGS = {
         "timestamp":      {"type": "date"},
     }
 }
+
+
+# --- CRF OPT / SIM mappings ---
+CRF_OPT_RESULT_MAPPINGS = {
+    "properties": {
+        "timestamp": {"type": "keyword"},
+        "message": {"type": "text"},
+        "moduleId": {"type": "keyword"},
+        "optimization_results": {"type": "object", "dynamic": True},
+        "optimization_run": {"type": "boolean"},
+        "solutionTime": {"type": "long"},
+        "totalTime": {"type": "long"},
+    }
+}
+
+CRF_SIM_RESULT_MAPPINGS = {
+    "properties": {
+        "timestamp": {"type": "keyword"},
+        "message": {"type": "text"},
+        "moduleId": {"type": "keyword"},
+        "simulation_run": {"type": "boolean"},
+        "solutionTime": {"type": "long"},
+        "totalTime": {"type": "long"},
+        "baseline": {"type": "object", "dynamic": True},
+        "best_phase": {"type": "object", "dynamic": True},
+    }
+}
+
 
 THRESHOLD_RESULT_MAPPINGS = {
     "properties": {
@@ -203,6 +287,7 @@ def init_kafka():
             bootstrap_servers=KAFKA_BROKER,
             auto_offset_reset="earliest",
             value_deserializer=lambda m: json.loads(m.decode("utf-8")),
+            key_deserializer=lambda k: k.decode("utf-8") if k is not None else None,
             enable_auto_commit=True,
             group_id="modapto-handler",
         )
@@ -278,45 +363,49 @@ def _normalize_keys(obj):
     else:
         return obj
 
+
+def _normalize_sa1_item(item: dict) -> dict:
+   
+    if not isinstance(item, dict):
+        return {}
+
+    norm = _normalize_keys(item)
+
+    if "dataList" in norm:
+        norm["data"] = norm.pop("dataList")
+
+    if "plc" in norm and not isinstance(norm["plc"], str):
+        norm["plc"] = str(norm["plc"])
+
+    norm["timestamp"] = _iso_or_none(norm.get("timestamp"))
+
+    return norm
+
+
+def _normalize_sa2_item(item: dict) -> dict:
+    if not isinstance(item, dict):
+        return {}
+    n = _normalize_keys(item)
+
+    n["timestamp"] = _iso_or_none(n.get("timestamp"))
+
+    if "value" in n and not isinstance(n["value"], str):
+        n["value"] = str(n["value"])
+
+    for k in ("lowThreshold", "highThreshold", "deviationPercentage"):
+        if k in n and n[k] is not None:
+            try:
+                n[k] = float(n[k])
+            except Exception:
+                n[k] = None
+    return n
+
+
 def _iso_or_none(ts):
 
     return ts if ts else None
 
 
-def handle_production_schedule_optimization(event):
-   
-   
-    try:
-        create_index_if_missing(PROD_OPT_INDEX, mappings=PROD_OPT_RESULT_MAPPINGS)
-
-        payload = event.get("results") or event or {}
-
-        module_id = payload.get("moduleId") or event.get("module") or event.get("moduleId")
-        smart_service_id = payload.get("smartServiceId") or event.get("smartService") or event.get("smartServiceId")
-        ts = payload.get("timestamp") or event.get("timestamp")
-        data = payload.get("data") or {}   # solutions map
-
-
-        doc = {
-            "moduleId":       module_id,
-            "smartServiceId": smart_service_id,
-            "timestamp":      ts,
-            "data":           data,
-            "sourceRaw": {
-                "description": event.get("description"),
-                "priority": event.get("priority"),
-                "eventType": event.get("eventType"),
-                "sourceComponent": event.get("sourceComponent"),
-                "topic": "production-schedule-optimization",
-            }
-        }
-
-        logger.info(f"[KAFKA-INP][SEW-OPT] module={module_id} ts={ts}")
-        es.index(index=PROD_OPT_INDEX, document=doc, refresh="wait_for")
-        logger.info(f"[ES] Indexed SEW optimization result into '{PROD_OPT_INDEX}'")
-    except Exception as e:
-        logger.error(f"Failed to index SEW optimization result: {e}")
-        logger.debug(f"Payload: {json.dumps(event, indent=2)}")
 
 
 # ---------------------------------
@@ -560,6 +649,40 @@ def handle_grouping_predictive_maintenance(event):
         logger.error(f"Failed to index grouping PM result: {e}")
         logger.debug(f"Payload: {json.dumps(event, indent=2)}")
 
+def handle_production_schedule_optimization(event):
+   
+   
+    try:
+        create_index_if_missing(PROD_OPT_INDEX, mappings=PROD_OPT_RESULT_MAPPINGS)
+
+        payload = event.get("results") or event or {}
+
+        module_id = payload.get("moduleId") or event.get("module") or event.get("moduleId")
+        smart_service_id = payload.get("smartServiceId") or event.get("smartService") or event.get("smartServiceId")
+        ts = payload.get("timestamp") or event.get("timestamp")
+        data = payload.get("data") or {}   # solutions map
+
+
+        doc = {
+            "moduleId":       module_id,
+            "smartServiceId": smart_service_id,
+            "timestamp":      ts,
+            "data":           data,
+            "sourceRaw": {
+                "description": event.get("description"),
+                "priority": event.get("priority"),
+                "eventType": event.get("eventType"),
+                "sourceComponent": event.get("sourceComponent"),
+                "topic": "production-schedule-optimization",
+            }
+        }
+
+        logger.info(f"[KAFKA-INP][SEW-OPT] module={module_id} ts={ts}")
+        es.index(index=PROD_OPT_INDEX, document=doc, refresh="wait_for")
+        logger.info(f"[ES] Indexed SEW optimization result into '{PROD_OPT_INDEX}'")
+    except Exception as e:
+        logger.error(f"Failed to index SEW optimization result: {e}")
+        logger.debug(f"Payload: {json.dumps(event, indent=2)}")
 
 def handle_threshold_predictive_maintenance(event):   
     try:
@@ -597,7 +720,6 @@ def handle_threshold_predictive_maintenance(event):
         logger.error(f"Failed to index threshold PM result: {e}")
         logger.debug(f"Payload: {json.dumps(event, indent=2)}")
 
-
 def handle_crf_sa_wear_detection_event(event):
 
     try:
@@ -632,6 +754,174 @@ def handle_crf_sa_wear_detection_event(event):
         logger.info(f"[ES] Indexed wear detection event into '{CRF_SA_INDEX}'")
     except Exception as e:
         logger.error(f"Failed to index wear detection event: {e}")
+        logger.debug(f"Payload: {json.dumps(event, indent=2)}")
+
+def handle_sa1_kpis_event(event):
+   
+    try:
+        create_index_if_missing(SA1_KPIS_INDEX, mappings=SA1_KPIS_MAPPINGS)
+
+        records = []
+        if isinstance(event, dict):
+            if isinstance(event.get("data"), list):
+                records = event["data"]
+            elif isinstance(event.get("results"), list):
+                records = event["results"]
+            elif isinstance(event.get("results"), dict):
+                records = [event["results"]]
+            else:
+                records = [event]
+        else:
+            logger.warning("[SA1-KPIS] Unsupported event format")
+            return
+
+        indexed = 0
+        for rec in records:
+            nr = _normalize_sa1_item(rec)
+
+            doc = {
+                "smartServiceId": nr.get("smartServiceId"),
+                "moduleId": nr.get("moduleId"),
+                "timestamp": nr.get("timestamp"),
+                "stage": nr.get("stage"),
+                "cell": nr.get("cell"),
+                "plc": nr.get("plc"),
+                "module": nr.get("module"),
+                "subElement": nr.get("subElement"),
+                "component": nr.get("component"),
+                "variable": nr.get("variable"),
+                "variableType": nr.get("variableType"),
+                "startingDate": nr.get("startingDate"),
+                "endingDate": nr.get("endingDate"),
+                "dataSource": nr.get("dataSource"),
+                "bucket": nr.get("bucket"),
+                "data": nr.get("data"),
+            }
+
+            es.index(index=SA1_KPIS_INDEX, document=doc, refresh="wait_for")
+            indexed += 1
+
+        logger.info(f"[ES] Indexed {indexed} SA1 KPI record(s) '{doc}' into '{SA1_KPIS_INDEX}'")
+    except Exception as e:
+        logger.error(f"Failed to index SA1 KPIs: {e}")
+        logger.debug(f"Payload: {json.dumps(event, indent=2)}")
+
+def handle_sa2_monitoring_event(event):
+
+    try:
+        create_index_if_missing(SA2_MONITORING_INDEX, mappings=SA2_MONITORING_MAPPINGS)
+
+        # Συγκέντρωση records από πιθανά wrappers
+        if isinstance(event, dict):
+            if isinstance(event.get("results"), list):
+                records = event["results"]
+            elif isinstance(event.get("data"), list):
+                records = event["data"]
+            else:
+                records = [event]
+        else:
+            logger.warning("[SA2] Unsupported event format")
+            return
+
+        indexed = 0
+        for rec in records:
+            nr = _normalize_sa2_item(rec)
+
+            doc = {
+                "timestamp": nr.get("timestamp"),
+                "moduleId": nr.get("moduleId"),
+                "module": nr.get("module"),
+                "component": nr.get("component"),
+                "property": nr.get("property"),
+                "value": nr.get("value"),
+                "lowThreshold": nr.get("lowThreshold"),
+                "highThreshold": nr.get("highThreshold"),
+                "deviationPercentage": nr.get("deviationPercentage"),
+            }
+
+            es.index(index=SA2_MONITORING_INDEX, document=doc, refresh="wait_for")
+            indexed += 1
+
+        logger.info(f"[ES] Indexed {indexed} SA2 monitoring record(s) '{doc}' into '{SA2_MONITORING_INDEX}'")
+    except Exception as e:
+        logger.error(f"Failed to index SA2 monitoring results: {e}")
+        logger.debug(f"Payload: {json.dumps(event, indent=2)}")
+
+
+def _first_present(*vals):
+    for v in vals:
+        if v is not None:
+            return v
+    return None
+
+def handle_crf_picking_sequence_optimization(event):
+    
+    try:
+        create_index_if_missing(CRF_OPT_INDEX, mappings=CRF_OPT_RESULT_MAPPINGS)
+        payload = event.get("results") if isinstance(event, dict) and isinstance(event.get("results"), dict) else event
+
+        ts = _first_present(payload.get("timestamp"), event.get("timestamp"))
+        module_id = _first_present(payload.get("moduleId"), event.get("moduleId"), event.get("module"))
+        message = _first_present(payload.get("message"), event.get("message"))
+        opt_results = _first_present(
+            payload.get("optimization_results"),
+            payload.get("optimizationResults"),
+        )
+        opt_run = _first_present(payload.get("optimization_run"), payload.get("optimizationRun"))
+        solution_time = payload.get("solutionTime")
+        total_time = payload.get("totalTime")
+
+        doc = {
+            "timestamp": ts,
+            "message": message,
+            "moduleId": module_id,
+            "optimization_results": opt_results,
+            "optimization_run": opt_run,
+            "solutionTime": solution_time,
+            "totalTime": total_time,
+        }
+
+        logger.info(f"[KAFKA-INP][CRF-OPT] module={module_id} ts={ts}")
+        es.index(index=CRF_OPT_INDEX, document=doc, refresh="wait_for")
+        logger.info(f"[ES] Indexed CRF optimization of '{doc} into '{CRF_OPT_INDEX}'")
+    except Exception as e:
+        logger.error(f"Failed to index CRF optimization: {e}")
+        logger.debug(f"Payload: {json.dumps(event, indent=2)}")
+
+
+def handle_crf_picking_sequence_simulation(event):
+   
+    try:
+        create_index_if_missing(CRF_SIM_INDEX, mappings=CRF_SIM_RESULT_MAPPINGS)
+        payload = event.get("results") if isinstance(event, dict) and isinstance(event.get("results"), dict) else event
+
+        ts = _first_present(payload.get("timestamp"), event.get("timestamp"))
+        module_id = _first_present(payload.get("moduleId"), event.get("moduleId"), event.get("module"))
+        message = _first_present(payload.get("message"), event.get("message"))
+
+        simulation_run = _first_present(payload.get("simulation_run"), payload.get("simulationRun"))
+        solution_time = payload.get("solutionTime")
+        total_time = payload.get("totalTime")
+
+        baseline = _first_present(payload.get("baseline"))
+        best_phase = _first_present(payload.get("best_phase"), payload.get("bestPhase"))
+
+        doc = {
+            "timestamp": ts,
+            "message": message,
+            "moduleId": module_id,
+            "simulation_run": simulation_run,
+            "solutionTime": solution_time,
+            "totalTime": total_time,
+            "baseline": baseline,
+            "best_phase": best_phase,
+        }
+
+        logger.info(f"[KAFKA-INP][CRF-SIM] module={module_id} ts={ts}")
+        es.index(index=CRF_SIM_INDEX, document=doc, refresh="wait_for")
+        logger.info(f"[ES] Indexed CRF simulation of '{doc} into '{CRF_SIM_INDEX}'")
+    except Exception as e:
+        logger.error(f"Failed to index CRF simulation: {e}")
         logger.debug(f"Payload: {json.dumps(event, indent=2)}")
 
 
@@ -833,7 +1123,9 @@ def kafka_loop():
                     message_count += 1
                     topic = record.topic
                     event = record.value
-                    logger.info(f"[Kafka] #{message_count} from '{topic}'")
+                    kkey = getattr(record, "key", None)
+
+                    logger.info(f"[Kafka] #{message_count} from '{topic}' key='{kkey}'")
                     try:
                         if topic == "modapto-module-creation":
                             handle_module_creation(event, record)
@@ -851,11 +1143,29 @@ def kafka_loop():
                             logger.info("Handling base64 encoded input...")
                             decode_base64_event(event)
                         elif topic == PROD_OPT_TOPIC:
-                            logger.info("Handling optimization sew output...")
+                            logger.info("Handling SEW optimization output...")
                             handle_production_schedule_optimization(event)
                         elif topic == CRF_SA_TOPIC:
-                            logger.info("Handling self-awareness wear detection...")
+                            logger.info("Handling CRF self-awareness wear detection...")
                             handle_crf_sa_wear_detection_event(event)
+                        elif topic == SA1_KPIS_TOPIC:
+                            logger.info("Handling SEW SA1 monitoring KPIs...")
+                            handle_sa1_kpis_event(event)
+                        elif topic == SA2_MONITORING_TOPIC:
+                            logger.info("Handling SEW SA2 real-time monitoring...")
+                            handle_sa2_monitoring_event(event)
+                        elif topic == MQTT_TOPIC:
+                            if kkey == "production-schedule-optimization":
+                                logger.info("[MQTT] Routed to production-schedule-optimization")
+                                handle_production_schedule_optimization(event)
+                            elif kkey == "kh-picking-sequence-optimization":
+                                logger.info("[MQTT] Routed to kh-picking-sequence-optimization")
+                                handle_crf_picking_sequence_optimization(event)
+                            elif kkey == "kh-picking-sequence-simulation":
+                                logger.info("[MQTT] Routed to kh-picking-sequence-simulation")
+                                handle_crf_picking_sequence_simulation(event)
+                        else:
+                            logger.warning(f"[MQTT] Unknown key '{kkey}' - ignoring")
                         else:
                             logger.warning(f"Unknown topic received: '{topic}'")
                         logger.info(f"[Kafka] processed from '{topic}'")
