@@ -70,7 +70,7 @@ CRF_OPT_INDEX = "optimization-crf"
 CRF_SIM_TOPIC = "kh-picking-sequence-simulation"
 CRF_SIM_INDEX = "simulation-crf"
 
-
+OPT_FFT_CONFIG_INDEX = "optimization-config-fft"
 
 # Kafka
 KAFKA_BROKER = os.getenv("KAFKA_URL", "kafka:9092")
@@ -925,7 +925,7 @@ def handle_crf_picking_sequence_simulation(event):
         logger.debug(f"Payload: {json.dumps(event, indent=2)}")
 
 
-# Upload File for PKB Conf
+
 def _case_to_index(case: str) -> str:
     case = (case or "").lower()
     if case == "opt":
@@ -1082,6 +1082,65 @@ async def upload_config_file_case(
 
     summary = _summarize_config(parsed or {})
     return {"ok": True, "case": case, "filename": file.filename, "summary": summary, "id": etag}
+
+
+
+
+@app.post("/config/upload/fft/opt")
+async def upload_config_fft_case(
+    file: UploadFile = File(...),
+):
+    if not file.filename.lower().endswith(".json"):
+        raise HTTPException(status_code=400, detail="Only .json files are accepted")
+
+    raw = await file.read()
+    if len(raw) > MAX_UPLOAD_SIZE:
+        raise HTTPException(status_code=413, detail="File too large")
+
+    raw_text = raw.decode("utf-8", errors="replace")
+
+    import hashlib
+    etag = hashlib.sha256(raw).hexdigest()
+
+    try:
+        parsed = json.loads(raw_text)
+    except Exception:
+        parsed = None  
+
+    index_name = OPT_FFT_CONFIG_INDEX
+    _ensure_config_index(index_name)
+
+    doc = {
+        "filename": file.filename,
+        "uploadedAt": datetime.utcnow().isoformat() + "Z",
+        "rawText": raw_text,
+        "config": parsed if isinstance(parsed, (dict, list)) else None,
+        "case": "opt-fft",
+        "etag": etag,
+    }
+
+    try:
+        es.index(index=index_name, id=etag, document=doc, refresh="wait_for")
+    except Exception as e:
+        logger.error(f"Failed to index FFT opt config: {e}")
+        raise HTTPException(status_code=500, detail="Failed to store config")
+
+    summary = {}
+    if isinstance(parsed, list):
+        try:
+            module_names = [x.get("module_name") for x in parsed if isinstance(x, dict)]
+            summary = {
+                "items": len(parsed),
+                "moduleNames": [m for m in module_names if m],
+            }
+        except Exception:
+            summary = {"items": len(parsed)}
+    elif isinstance(parsed, dict):
+        summary = _summarize_config(parsed or {})  # αν θέλεις reuse
+
+    return {"ok": True, "case": "opt", "filename": file.filename, "summary": summary, "id": etag}
+
+
 
 
 
