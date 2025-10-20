@@ -515,6 +515,7 @@ def handle_module_creation(event, msg):
         "endpoint": results.get("endpoint"),
         "timestamp_elastic": getattr(msg, "timestamp", None),
         "timestamp_dt": event.get("timestamp"),
+        "metadata": {}
         "smartServices": [],
     }
     es.index(index=ES_INDEX, document=doc)
@@ -542,6 +543,7 @@ def handle_module_update(event, msg):
                 "endpoint": results.get("endpoint"),
                 "timestamp_dt": event.get("timestamp"),
                 "timestamp_elastic": getattr(msg, "timestamp", None),
+                "metadata": {}
                 "smartServices": [],
             }
             es.index(index=ES_INDEX, document=doc)
@@ -1223,8 +1225,8 @@ def kafka_loop():
                             elif kkey == "kh-picking-sequence-simulation":
                                 logger.info("[MQTT] Routed to kh-picking-sequence-simulation")
                                 handle_crf_picking_sequence_simulation(event)
-                        else:
-                            logger.warning(f"[MQTT] Unknown key '{kkey}' - ignoring")
+                            else:
+                                logger.warning(f"[MQTT] Unknown key '{kkey}' - ignoring")
                         else:
                             logger.warning(f"Unknown topic received: '{topic}'")
                         logger.info(f"[Kafka] processed from '{topic}'")
