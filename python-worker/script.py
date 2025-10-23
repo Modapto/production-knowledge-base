@@ -544,6 +544,7 @@ def handle_module_creation(event, msg):
         "endpoint": results.get("endpoint"),
         "timestamp_elastic": getattr(msg, "timestamp", None),
         "timestamp_dt": event.get("timestamp"),
+        "metadata": {},
         "smartServices": [],
     }
     es.index(index=ES_INDEX, document=doc)
@@ -571,6 +572,7 @@ def handle_module_update(event, msg):
                 "endpoint": results.get("endpoint"),
                 "timestamp_dt": event.get("timestamp"),
                 "timestamp_elastic": getattr(msg, "timestamp", None),
+                "metadata": {},
                 "smartServices": [],
             }
             es.index(index=ES_INDEX, document=doc)
