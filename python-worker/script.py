@@ -27,6 +27,8 @@ from fastapi import Body
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, conint, confloat
 
+from json import JSONDecodeError
+
 # ---------------------------------
 # Logging
 # ---------------------------------
@@ -286,7 +288,8 @@ def init_kafka():
             *TOPICS,
             bootstrap_servers=KAFKA_BROKER,
             auto_offset_reset="earliest",
-            value_deserializer=lambda m: json.loads(m.decode("utf-8")),
+            # value_deserializer=lambda m: json.loads(m.decode("utf-8")),
+            value_deserializer=_safe_json_deserializer,
             key_deserializer=lambda k: k.decode("utf-8") if k is not None else None,
             enable_auto_commit=True,
             group_id="modapto-handler",
@@ -338,6 +341,32 @@ def find_document_by_module_id(module_id, index_name=ES_INDEX):
 
 
 # Generic Handlers 
+
+def _safe_json_deserializer(m: bytes):
+    if not m:  
+        return None
+    try:
+        v = json.loads(m.decode("utf-8"))
+    except JSONDecodeError:
+        return None
+    return v  
+
+def _is_blank(obj) -> bool:
+    # None -> blank
+    if obj is None:
+        return True
+    # empty containers -> blank
+    if isinstance(obj, (list, tuple, set, dict)) and len(obj) == 0:
+        return True
+    # dict
+    if isinstance(obj, dict):
+        for v in obj.values():
+            if not _is_blank(v):
+                return False
+        return True
+    return False
+
+
 def _to_camel_key(s: str) -> str:
 
     if not isinstance(s, str):
@@ -1184,6 +1213,16 @@ def kafka_loop():
                     event = record.value
                     kkey = getattr(record, "key", None)
 
+# DROP of empty events
+if _is_blank(event):
+    logger.warning(f"[Kafka] Dropping blank/invalid event from '{topic}' (key='{kkey}')")
+    continue
+
+if not isinstance(event, dict):
+    logger.warning(f"[Kafka] Dropping non-dict event from '{topic}': {type(event)}")
+    continue
+
+
                     logger.info(f"[Kafka] #{message_count} from '{topic}' key='{kkey}'")
                     try:
                         if topic == "modapto-module-creation":
@@ -1223,8 +1262,8 @@ def kafka_loop():
                             elif kkey == "kh-picking-sequence-simulation":
                                 logger.info("[MQTT] Routed to kh-picking-sequence-simulation")
                                 handle_crf_picking_sequence_simulation(event)
-                        else:
-                            logger.warning(f"[MQTT] Unknown key '{kkey}' - ignoring")
+                            else:
+                                logger.warning(f"[MQTT] Unknown key '{kkey}' - ignoring")
                         else:
                             logger.warning(f"Unknown topic received: '{topic}'")
                         logger.info(f"[Kafka] processed from '{topic}'")
