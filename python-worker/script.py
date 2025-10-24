@@ -538,6 +538,11 @@ def handle_module_creation(event, msg):
         return
 
     create_index_if_missing(ES_INDEX)
+
+    if module_exists(ES_INDEX, module_id):
+        logger.info(f"[SKIP] Module '{module_id}' already exists in '{ES_INDEX}'")
+        return
+
     doc = {
         "name": results.get("name"),
         "moduleId": module_id,
@@ -547,7 +552,7 @@ def handle_module_creation(event, msg):
         "metadata": {},
         "smartServices": [],
     }
-    es.index(index=ES_INDEX, document=doc)
+    es.index(index=ES_INDEX, document=doc,refresh="wait_for")
     logger.info(f"Inserted module document (moduleId='{module_id}') into '{ES_INDEX}'")
 
     if producer:
@@ -613,6 +618,23 @@ def handle_module_deletion(event):
         logger.info(f"Deleted {deleted} document(s) for moduleId '{module_id}'")
     except Exception as e:
         logger.error(f"Failed to delete module '{module_id}': {e}")
+
+def module_exists(index_name: str, module_id: str) -> bool:
+    try:
+        resp = es.search(
+            index=index_name,
+            body={
+                "query": {"term": {"moduleId": module_id}},
+                "size": 1,
+                "_source": False
+            },
+        )
+        hits = resp.get("hits", {}).get("hits", [])
+        return len(hits) > 0
+    except Exception as e:
+        logger.error(f"Exists-check failed for moduleId='{module_id}': {e}")
+        return False
+
 
 def handle_smart_service_event(event, topic, msg):
     results = event.get("results", {})
