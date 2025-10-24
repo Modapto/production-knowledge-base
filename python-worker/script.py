@@ -1284,7 +1284,8 @@ def kafka_loop():
                             logger.warning(f"[MQTT] Unknown key '{kkey}' - ignoring")
                     else:
                         logger.warning(f"Unknown topic received: '{topic}'")
-                        logger.info(f"[Kafka] processed from '{topic}'")
+                    
+                    logger.info(f"[Kafka] processed from '{topic}'")
                 except Exception as e:
                     logger.error(f"[Kafka] Error processing message from '{topic}': {e}")
                     logger.debug(f"Failed event data: {json.dumps(event, indent=2)}")
