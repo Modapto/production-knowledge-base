@@ -1207,12 +1207,6 @@ def get_current_config(case: str = Path(..., description="Either 'opt' or 'sim'"
     except NotFoundError:
         raise HTTPException(status_code=404, detail="No current config found")
 
-
-
-
-
-
-
 # ---------------------------------
 # Kafka consumer loop (thread)
 # ---------------------------------
@@ -1237,64 +1231,64 @@ def kafka_loop():
                     event = record.value
                     kkey = getattr(record, "key", None)
 
-# DROP of empty events
-if _is_blank(event):
-    logger.warning(f"[Kafka] Dropping blank/invalid event from '{topic}' (key='{kkey}')")
-    continue
+                # DROP of empty events
+                if _is_blank(event):
+                    logger.warning(f"[Kafka] Dropping blank/invalid event from '{topic}' (key='{kkey}')")
+                    continue
 
-if not isinstance(event, dict):
-    logger.warning(f"[Kafka] Dropping non-dict event from '{topic}': {type(event)}")
-    continue
+                if not isinstance(event, dict):
+                    logger.warning(f"[Kafka] Dropping non-dict event from '{topic}': {type(event)}")
+                    continue
 
 
-                    logger.info(f"[Kafka] #{message_count} from '{topic}' key='{kkey}'")
-                    try:
-                        if topic == "modapto-module-creation":
-                            handle_module_creation(event, record)
-                        elif topic == "modapto-module-update":
-                            handle_module_update(event, record)
-                        elif topic == "modapto-module-deletion":
-                            handle_module_deletion(event)
-                        elif topic in ["smart-service-assigned", "smart-service-unassigned"]:
-                            handle_smart_service_event(event, topic, record)
-                        elif topic == GROUPING_TOPIC:
-                             handle_grouping_predictive_maintenance(event)
-                        elif topic == THRESHOLD_TOPIC:
-                            handle_threshold_predictive_maintenance(event)
-                        elif topic == "base64-input-events":
-                            logger.info("Handling base64 encoded input...")
-                            decode_base64_event(event)
-                        elif topic == PROD_OPT_TOPIC:
-                            logger.info("Handling SEW optimization output...")
+                logger.info(f"[Kafka] #{message_count} from '{topic}' key='{kkey}'")
+                try:
+                    if topic == "modapto-module-creation":
+                        handle_module_creation(event, record)
+                    elif topic == "modapto-module-update":
+                        handle_module_update(event, record)
+                    elif topic == "modapto-module-deletion":
+                        handle_module_deletion(event)
+                    elif topic in ["smart-service-assigned", "smart-service-unassigned"]:
+                        handle_smart_service_event(event, topic, record)
+                    elif topic == GROUPING_TOPIC:
+                         handle_grouping_predictive_maintenance(event)
+                    elif topic == THRESHOLD_TOPIC:
+                        handle_threshold_predictive_maintenance(event)
+                    elif topic == "base64-input-events":
+                        logger.info("Handling base64 encoded input...")
+                        decode_base64_event(event)
+                    elif topic == PROD_OPT_TOPIC:
+                        logger.info("Handling SEW optimization output...")
+                        handle_production_schedule_optimization(event)
+                    elif topic == CRF_SA_TOPIC:
+                        logger.info("Handling CRF self-awareness wear detection...")
+                        handle_crf_sa_wear_detection_event(event)
+                    elif topic == SA1_KPIS_TOPIC:
+                        logger.info("Handling SEW SA1 monitoring KPIs...")
+                        handle_sa1_kpis_event(event)
+                    elif topic == SA2_MONITORING_TOPIC:
+                        logger.info("Handling SEW SA2 real-time monitoring...")
+                        handle_sa2_monitoring_event(event)
+                    elif topic == MQTT_TOPIC:
+                        if kkey == "production-schedule-optimization":
+                            logger.info("[MQTT] Routed to production-schedule-optimization")
                             handle_production_schedule_optimization(event)
-                        elif topic == CRF_SA_TOPIC:
-                            logger.info("Handling CRF self-awareness wear detection...")
-                            handle_crf_sa_wear_detection_event(event)
-                        elif topic == SA1_KPIS_TOPIC:
-                            logger.info("Handling SEW SA1 monitoring KPIs...")
-                            handle_sa1_kpis_event(event)
-                        elif topic == SA2_MONITORING_TOPIC:
-                            logger.info("Handling SEW SA2 real-time monitoring...")
-                            handle_sa2_monitoring_event(event)
-                        elif topic == MQTT_TOPIC:
-                            if kkey == "production-schedule-optimization":
-                                logger.info("[MQTT] Routed to production-schedule-optimization")
-                                handle_production_schedule_optimization(event)
-                            elif kkey == "kh-picking-sequence-optimization":
-                                logger.info("[MQTT] Routed to kh-picking-sequence-optimization")
-                                handle_crf_picking_sequence_optimization(event)
-                            elif kkey == "kh-picking-sequence-simulation":
-                                logger.info("[MQTT] Routed to kh-picking-sequence-simulation")
-                                handle_crf_picking_sequence_simulation(event)
-                            else:
-                                logger.warning(f"[MQTT] Unknown key '{kkey}' - ignoring")
+                        elif kkey == "kh-picking-sequence-optimization":
+                            logger.info("[MQTT] Routed to kh-picking-sequence-optimization")
+                            handle_crf_picking_sequence_optimization(event)
+                        elif kkey == "kh-picking-sequence-simulation":
+                            logger.info("[MQTT] Routed to kh-picking-sequence-simulation")
+                            handle_crf_picking_sequence_simulation(event)
                         else:
-                            logger.warning(f"Unknown topic received: '{topic}'")
+                            logger.warning(f"[MQTT] Unknown key '{kkey}' - ignoring")
+                    else:
+                        logger.warning(f"Unknown topic received: '{topic}'")
                         logger.info(f"[Kafka] processed from '{topic}'")
-                    except Exception as e:
-                        logger.error(f"[Kafka] Error processing message from '{topic}': {e}")
-                        logger.debug(f"Failed event data: {json.dumps(event, indent=2)}")
-                        continue
+                except Exception as e:
+                    logger.error(f"[Kafka] Error processing message from '{topic}': {e}")
+                    logger.debug(f"Failed event data: {json.dumps(event, indent=2)}")
+                    continue
     except Exception as e:
         logger.error(f"[Kafka] Fatal loop error: {e}")
     finally:
@@ -1305,7 +1299,7 @@ if not isinstance(event, dict):
             if producer:
                 producer.close()
         except Exception as e:
-            logger.error(f"Kafka] Error on close: {e}")
+            logger.error(f"Kafka Error on close: {e}")
         logger.info("[Kafka] Thread exit.")
 
 # ---------------------------------
