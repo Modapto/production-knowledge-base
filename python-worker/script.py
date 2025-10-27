@@ -74,6 +74,9 @@ CRF_SIM_INDEX = "simulation-crf"
 
 OPT_FFT_CONFIG_INDEX = "optimization-config-fft"
 
+ROBOT_CONFIG_FFT_INDEX = "robot-config-fft"
+
+
 # Kafka
 KAFKA_BROKER = os.getenv("KAFKA_URL", "kafka:9092")
 TOPICS = [
@@ -105,6 +108,36 @@ TIMEWINDOW_MAPPING = {
 # Indices for P3 Opt and Sim
 OPT_CONFIG_INDEX = "kitting-configs-opt"
 SIM_CONFIG_INDEX = "kitting-configs-sim"
+
+# ---------------------------------
+# Mappings 
+# ---------------------------------
+PROCESS_DRIFT_MAPPINGS = {
+    "properties": {
+        "moduleId": {"type": "keyword"},  
+        "module": {"type": "keyword"},    
+        "component": {"type": "keyword"},
+
+
+        "stage": {"type": "keyword"},
+        "cell": {"type": "keyword"},
+        "failureType": {"type": "keyword"},
+        "failureDescription": {"type": "text"},
+        "maintenanceAction": {"type": "text"},
+        "componentReplacement": {"type": "keyword"},
+        "workerName": {"type": "keyword"},
+        "driftDone": {"type": "boolean"},
+
+
+        "timestamp": {"type": "date"},               # event timestamp UI
+        "timestamp_api_received": {"type": "date"},  # server-side
+        "starttime": {"type": "date"},               # moment START declared
+        "endtime": {"type": "date"},                 # moment DONE toggled
+
+
+        "source": {"type": "keyword"}  # 'eds'
+    }
+}
 
 CONFIG_MAPPINGS = {
     "properties": {
@@ -435,39 +468,49 @@ def _iso_or_none(ts):
     return ts if ts else None
 
 
+def _extract_robot_config(src: dict) -> dict:
 
+    if not isinstance(src, dict):
+        return {}
 
-# ---------------------------------
-# Mappings 
-# ---------------------------------
-PROCESS_DRIFT_MAPPINGS = {
-    "properties": {
-        "moduleId": {"type": "keyword"},  
-        "module": {"type": "keyword"},    
-        "component": {"type": "keyword"},
+    rc = src.get("robotConfiguration")
+    if isinstance(rc, dict) and rc:
+        return rc
 
+    cfg = src.get("config")
+    if isinstance(cfg, dict):
+        rc2 = cfg.get("robotConfiguration")
+        if isinstance(rc2, dict) and rc2:
+            return rc2
 
-        "stage": {"type": "keyword"},
-        "cell": {"type": "keyword"},
-        "failureType": {"type": "keyword"},
-        "failureDescription": {"type": "text"},
-        "maintenanceAction": {"type": "text"},
-        "componentReplacement": {"type": "keyword"},
-        "workerName": {"type": "keyword"},
-        "driftDone": {"type": "boolean"},
+        if "robot" in cfg or "module_name" in cfg:
+            return {
+                "module_name": cfg.get("module_name"),
+                "robot": cfg.get("robot") or cfg,
+            }
 
+    raw = src.get("rawText")
+    if isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                if "robotConfiguration" in parsed and isinstance(parsed["robotConfiguration"], dict):
+                    return parsed["robotConfiguration"]
+                if "robot" in parsed or "module_name" in parsed:
+                    return {
+                        "module_name": parsed.get("module_name"),
+                        "robot": parsed.get("robot") or parsed,
+                    }
+        except Exception:
+            pass
 
-        "timestamp": {"type": "date"},               # event timestamp UI
-        "timestamp_api_received": {"type": "date"},  # server-side
-        "starttime": {"type": "date"},               # moment START declared
-        "endtime": {"type": "date"},                 # moment DONE toggled
+    if "robot" in src or "module_name" in src:
+        return {
+            "module_name": src.get("module_name"),
+            "robot": src.get("robot") or src,
+        }
 
-
-        "source": {"type": "keyword"}  # 'eds'
-    }
-}
-
-
+    return {}
 
 
 def update_smart_services(module_id, service_data, assign=True, event=None, msg=None):
@@ -1194,6 +1237,71 @@ async def upload_config_fft_case(
     return {"ok": True, "case": "opt", "filename": file.filename, "summary": summary, "id": etag}
 
 
+@app.get("/robot-config/fft")
+def get_robot_config_fft(module_id: Optional[str], module_name: Optional[str] = Query(None, alias="moduleName")):
+    """
+    Returns robotConfiguration
+    """
+    try:
+        must = [{"term": {"moduleId": module_id}}]
+        query = {"bool": {"must": must}}
+
+        resp = es.search(
+            index=ROBOT_CONFIG_FFT_INDEX,
+            body={
+                # "query": query,
+                "size": 1,
+                "sort": [
+                    {"uploadedAt": {"order": "desc", "unmapped_type": "date"}},
+                    {"_score": {"order": "desc"}}
+                ],
+            },
+        )
+        hits = resp.get("hits", {}).get("hits", []) or []
+
+        if not hits and module_name:
+            resp2 = es.search(
+                index=ROBOT_CONFIG_FFT_INDEX,
+                body={
+                    "query": {"term": {"module_name": module_name}},
+                    "size": 1,
+                    "sort": [
+                        {"uploadedAt": {"order": "desc", "unmapped_type": "date"}},
+                        {"_score": {"order": "desc"}}
+                    ],
+                },
+            )
+            hits = resp2.get("hits", {}).get("hits", []) or []
+
+        if not hits:
+            raise HTTPException(status_code=404, detail="No robot configuration found for given module")
+
+        hit = hits[0]
+        src = hit.get("_source", {})
+        robot_cfg = _extract_robot_config(src)
+
+        if not robot_cfg:
+            raise HTTPException(status_code=422, detail="Document found but robotConfiguration is missing or unreadable")
+
+        return {
+            "ok": True,
+            "moduleId": module_id,
+            "moduleName": module_name,
+            "id": hit.get("_id"),
+            "robotConfiguration": robot_cfg,
+            "documentMeta": {
+                "uploadedAt": src.get("uploadedAt"),
+                "index": ROBOT_CONFIG_FFT_INDEX,
+            }
+        }
+
+    except NotFoundError:
+        raise HTTPException(status_code=404, detail="Index not found")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to fetch robot config for '{module_id}': {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch robot configuration")
 
 
 
