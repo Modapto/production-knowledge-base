@@ -404,11 +404,26 @@ def _to_camel_key(s: str) -> str:
 
     if not isinstance(s, str):
         return s
+
+    # First split on spaces and underscores
     tokens = re.split(r'[\s_]+', s.strip())
-    if not tokens:
-        return s
-    head = tokens[0].lower()
-    tail = [t.capitalize() for t in tokens[1:]]
+
+    # Then split each token on capital letters
+    expanded_tokens = []
+    for token in tokens:
+        if token:
+            # Split on capital letters
+            parts = re.findall(r'[A-Z]?[a-z]+|[A-Z]+(?=[A-Z][a-z]|\b)', token)
+            if parts:
+                expanded_tokens.extend(parts)
+            else:
+                expanded_tokens.append(token)
+
+    if not expanded_tokens:
+        return s.lower()
+
+    head = expanded_tokens[0].lower()
+    tail = [t.capitalize() for t in expanded_tokens[1:]]
     return head + "".join(tail)
 
 def _normalize_keys(obj):
@@ -853,9 +868,14 @@ def handle_crf_sa_wear_detection_event(event):
         logger.debug(f"Payload: {json.dumps(event, indent=2)}")
 
 def handle_sa1_kpis_event(event):
-   
+
     try:
         create_index_if_missing(SA1_KPIS_INDEX, mappings=SA1_KPIS_MAPPINGS)
+
+        # Extract top-level fields
+        top_level_module = event.get("module")
+        top_level_smart_service = event.get("smartService")
+        top_level_timestamp = event.get("timestamp")
 
         records = []
         if isinstance(event, dict):
@@ -876,9 +896,9 @@ def handle_sa1_kpis_event(event):
             nr = _normalize_sa1_item(rec)
 
             doc = {
-                "smartServiceId": nr.get("smartServiceId"),
-                "moduleId": nr.get("moduleId"),
-                "timestamp": nr.get("timestamp"),
+                "smartServiceId": top_level_smart_service,
+                "moduleId": top_level_module,
+                "timestamp":top_level_timestamp,
                 "stage": nr.get("stage"),
                 "cell": nr.get("cell"),
                 "plc": nr.get("plc"),
