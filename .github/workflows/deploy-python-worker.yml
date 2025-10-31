@@ -24,8 +24,11 @@ jobs:
           username: ${{ secrets.VM_USER }}
           key: ${{ secrets.VM_SSH_KEY }}
           script: |
-            # Ensure proper Directory permissions
-            chmod -R 755 /root/modapto/system-deployment/production-knowledge-base/python-worker
+            # Remove existing python-worker directory
+            rm -rf /root/modapto/system-deployment/production-knowledge-base/python-worker
+
+            # Create directory structure
+            mkdir -p /root/modapto/system-deployment/production-knowledge-base/python-worker
 
             echo "Target directory prepared"
 
@@ -73,8 +76,11 @@ jobs:
           username: ${{ secrets.VM_USER }}
           key: ${{ secrets.VM_SSH_KEY }}
           script: |
-            # Ensure proper directory permissions
-            chmod -R 755 /root/modapto/fft-deployment/production-knowledge-base/python-worker
+            # Remove existing python-worker directory
+            rm -rf /root/modapto/fft-deployment/production-knowledge-base/python-worker
+
+            # Create directory structure
+            mkdir -p /root/modapto/fft-deployment/production-knowledge-base/python-worker
 
             echo "Target directory prepared"
 
