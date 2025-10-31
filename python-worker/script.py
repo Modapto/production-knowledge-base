@@ -81,6 +81,9 @@ OPT_FFT_CONFIG_INDEX = "optimization-config-fft"
 ROBOT_CONFIG_FFT_INDEX = "robot-config-fft"
 
 
+TOPICS_ALLOWING_NULL_RESULTS = {"modapto-module-deletion"}
+
+
 # Kafka
 KAFKA_BROKER = os.getenv("KAFKA_URL", "kafka:9092")
 TOPICS = [
@@ -169,17 +172,11 @@ CONFIG_MAPPINGS = {
 CRF_SA_MAPPINGS = {
     "properties": {
         "moduleId":       {"type": "keyword"},
-        "smartServiceId": {"type": "keyword"},
-        "pilot":          {"type": "keyword"},
-        "priority":       {"type": "keyword"},
         "eventType":      {"type": "keyword"},   
-        "resultEventType":{"type": "integer"},  
         "rfidStation":    {"type": "integer"},
         "khType":         {"type": "integer"},
         "khId":           {"type": "integer"},
         "timestamp":      {"type": "date"},      
-        "description":    {"type": "text"},
-        "sourceRaw":      {"type": "object", "dynamic": True}
     }
 }
 
@@ -783,7 +780,7 @@ def handle_production_schedule_simulation(event):
     Store simulation results for SEW production schedule into simulation-sew
     """
     try:
-        create_index_if_missing(PROD_SIM_INDEX, mappings=PROD_SIM_RESULT_MAPPINGS)
+        create_index_if_missing(PROD_SIM_INDEX)
 
         payload = event.get("results") or event or {}
 
@@ -796,14 +793,7 @@ def handle_production_schedule_simulation(event):
             "moduleId":       module_id,
             "smartServiceId": smart_service_id,
             "timestamp":      ts,
-            "data":           data,
-            "sourceRaw": {
-                "description": event.get("description"),
-                "priority": event.get("priority"),
-                "eventType": event.get("eventType"),
-                "sourceComponent": event.get("sourceComponent"),
-                "topic": "production-schedule-simulation",
-            }
+            "data":           data
         }
 
         logger.info(f"[KAFKA-INP][SEW-SIM] module={module_id} ts={ts}, doc {doc}")
@@ -899,22 +889,14 @@ def handle_crf_sa_wear_detection_event(event):
 
         doc = {
             "moduleId":        event.get("module"),
-            "smartServiceId":  event.get("smartService"),
-            "pilot":           event.get("pilot"),
-            "priority":        event.get("priority"),
             "eventType":       event.get("eventType"),            
-            "resultEventType": results.get("eventType"),         
             "rfidStation":     results.get("rfidStation"),
             "khType":          results.get("khType"),
             "khId":            results.get("khId"),
-            "timestamp":       ts,
-            "description":     event.get("description"),
-            "sourceRaw": {
-                "topic": event.get("topic") or CRF_SA_TOPIC,
-            },
+            "timestamp":       ts
         }
 
-        logger.info(f"[KAFKA-INP][WEAR] module={doc.get('moduleId')} smartService={doc.get('smartServiceId')} ts={ts} doc={doc}")
+        logger.info(f"[KAFKA-INP][WEAR] module={doc.get('moduleId')} ts={ts} doc={doc}")
         logger.debug(f"[KAFKA-INP][WEAR] payload: {json.dumps(event, indent=2)}")
 
         es.index(index=CRF_SA_INDEX, document=doc, refresh="wait_for")
@@ -1423,6 +1405,11 @@ def kafka_loop():
                     if not isinstance(event, dict):
                         logger.warning(f"[Kafka] Dropping non-dict event from '{topic}': {type(event)}")
                         continue
+
+                    if topic not in TOPICS_ALLOWING_NULL_RESULTS:
+                        if "results" in event and event["results"] is None:
+                            logger.warning(f"[Kafka] Dropping event {event} from '{topic}' because results is null)")
+                            continue
 
 
                     logger.info(f"[Kafka] #{message_count} from '{topic}' key='{kkey}'")
