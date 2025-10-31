@@ -17,6 +17,18 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Prepare target directory on server
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VM_HOST_IP }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.VM_SSH_KEY }}
+          script: |
+            # Ensure proper Directory permissions
+            chmod -R 755 /root/modapto/system-deployment/production-knowledge-base/python-worker
+
+            echo "Target directory prepared"
+
       - name: Copy python-worker files to Dev Deployment
         uses: appleboy/scp-action@v0.1.7
         with:
@@ -53,6 +65,18 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Prepare target directory on server
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VM_HOST_IP }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.VM_SSH_KEY }}
+          script: |
+            # Ensure proper directory permissions
+            chmod -R 755 /root/modapto/fft-deployment/production-knowledge-base/python-worker
+
+            echo "Target directory prepared"
 
       - name: Copy python-worker files to FFT Deployment
         uses: appleboy/scp-action@v0.1.7
