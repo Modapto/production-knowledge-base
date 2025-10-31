@@ -30,6 +30,9 @@ jobs:
             # Create directory structure
             mkdir -p /root/modapto/system-deployment/production-knowledge-base/python-worker
 
+            # Fix permissions
+            chmod -R 777 /root/modapto/fft-deployment/production-knowledge-base/python-worker
+
             echo "Target directory prepared"
 
       - name: Copy python-worker files to Dev Deployment
@@ -81,6 +84,9 @@ jobs:
 
             # Create directory structure
             mkdir -p /root/modapto/fft-deployment/production-knowledge-base/python-worker
+
+            # Fix permissions
+            chmod -R 777 /root/modapto/fft-deployment/production-knowledge-base/python-worker
 
             echo "Target directory prepared"
 
