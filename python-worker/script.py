@@ -72,6 +72,9 @@ CRF_OPT_INDEX = "optimization-crf"
 CRF_SIM_TOPIC = "kh-picking-sequence-simulation"
 CRF_SIM_INDEX = "simulation-crf"
 
+PROD_SIM_TOPIC = "production-schedule-simulation"
+PROD_SIM_INDEX = "simulation-sew"
+
 OPT_FFT_CONFIG_INDEX = "optimization-config-fft"
 
 ROBOT_CONFIG_FFT_INDEX = "robot-config-fft"
@@ -89,6 +92,7 @@ TOPICS = [
     GROUPING_TOPIC,
     THRESHOLD_TOPIC,
     PROD_OPT_TOPIC,
+    PROD_SIM_TOPIC
     CRF_SA_TOPIC,
     SA1_KPIS_TOPIC,
     SA2_MONITORING_TOPIC,
@@ -138,6 +142,17 @@ PROCESS_DRIFT_MAPPINGS = {
         "source": {"type": "keyword"}  # 'eds'
     }
 }
+
+PROD_OPT_RESULT_MAPPINGS = {
+    "properties": {
+        "timestamp":  {"type": "keyword"},
+        "moduleId":   {"type": "keyword"},
+        "data":       {"type": "object", "dynamic": True},
+        "smartServiceId": {"type": "keyword"},
+        "sourceRaw":  {"type": "object", "dynamic": True},
+    }
+}
+
 
 CONFIG_MAPPINGS = {
     "properties": {
@@ -760,6 +775,46 @@ def handle_grouping_predictive_maintenance(event):
         logger.error(f"Failed to index grouping PM result: {e}")
         logger.debug(f"Payload: {json.dumps(event, indent=2)}")
 
+
+
+def handle_production_schedule_simulation(event):
+    """
+    Store simulation results for SEW production schedule into simulation-sew
+    """
+    try:
+        create_index_if_missing(PROD_SIM_INDEX, mappings=PROD_SIM_RESULT_MAPPINGS)
+
+        payload = event.get("results") or event or {}
+
+        module_id = payload.get("moduleId") or event.get("module") or event.get("moduleId")
+        smart_service_id = payload.get("smartServiceId") or event.get("smartService") or event.get("smartServiceId")
+        ts = payload.get("timestamp") or event.get("timestamp")
+        data = payload.get("data") or {}
+
+        doc = {
+            "moduleId":       module_id,
+            "smartServiceId": smart_service_id,
+            "timestamp":      ts,
+            "data":           data,
+            "sourceRaw": {
+                "description": event.get("description"),
+                "priority": event.get("priority"),
+                "eventType": event.get("eventType"),
+                "sourceComponent": event.get("sourceComponent"),
+                "topic": "production-schedule-simulation",
+            }
+        }
+
+        logger.info(f"[KAFKA-INP][SEW-SIM] module={module_id} ts={ts}, doc {doc}")
+        es.index(index=PROD_SIM_INDEX, document=doc, refresh="wait_for")
+        logger.info(f"[ES] Indexed SEW simulation result into '{PROD_SIM_INDEX}'")
+    except Exception as e:
+        logger.error(f"Failed to index SEW simulation result: {e}")
+        logger.debug(f"Payload: {json.dumps(event, indent=2)}")
+
+
+
+
 def handle_production_schedule_optimization(event):
    
    
@@ -858,7 +913,7 @@ def handle_crf_sa_wear_detection_event(event):
             },
         }
 
-        logger.info(f"[KAFKA-INP][WEAR] module={doc.get('moduleId')} smartService={doc.get('smartServiceId')} ts={ts}")
+        logger.info(f"[KAFKA-INP][WEAR] module={doc.get('moduleId')} smartService={doc.get('smartServiceId')} ts={ts} doc={doc}")
         logger.debug(f"[KAFKA-INP][WEAR] payload: {json.dumps(event, indent=2)}")
 
         es.index(index=CRF_SA_INDEX, document=doc, refresh="wait_for")
@@ -1389,6 +1444,9 @@ def kafka_loop():
                         elif topic == PROD_OPT_TOPIC:
                             logger.info("Handling SEW optimization output...")
                             handle_production_schedule_optimization(event)
+                        elif topic == PROD_SIM_TOPIC:
+                            logger.info("Handling SEW simulation output...")
+                            handle_production_schedule_simulation(event)
                         elif topic == CRF_SA_TOPIC:
                             logger.info("Handling CRF self-awareness wear detection...")
                             handle_crf_sa_wear_detection_event(event)
@@ -1402,6 +1460,9 @@ def kafka_loop():
                             if kkey == "production-schedule-optimization":
                                 logger.info("[MQTT] Routed to production-schedule-optimization")
                                 handle_production_schedule_optimization(event)
+                            elif kkey == "production-schedule-simulation":
+                                logger.info("[MQTT] Routed to production-schedule-simulation")
+                                handle_production_schedule_simulation(event)
                             elif kkey == "kh-picking-sequence-optimization":
                                 logger.info("[MQTT] Routed to kh-picking-sequence-optimization")
                                 handle_crf_picking_sequence_optimization(event)
