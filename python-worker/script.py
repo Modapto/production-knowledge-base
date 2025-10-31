@@ -1524,9 +1524,9 @@ def signal_handler(sig, frame):
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
 
-# ---------------------------------
+# ----------------------------------
 # Main
-# ---------------------------------
+# ----------------------------------
 if __name__ == "__main__":
     if RUN_MODE == "both":
         main_both()
