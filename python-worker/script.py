@@ -58,7 +58,8 @@ PROD_OPT_TOPIC = "production-schedule-optimization"
 PROD_OPT_INDEX = "optimization-sew"
 
 CRF_SA_TOPIC = "self-awareness-wear-detection"
-CRF_SA_INDEX = "kitholder-event-results-crf"
+# CRF_SA_INDEX = "kitholder-event-results-crf"
+CRF_SA_INDEX ="crf-kit-holder-notifications"
 
 SA1_KPIS_TOPIC = "self-awareness-monitor-kpis"
 SA1_KPIS_INDEX = "sew-self-awareness-monitoring-kpis"
@@ -92,7 +93,7 @@ TOPICS = [
     GROUPING_TOPIC,
     THRESHOLD_TOPIC,
     PROD_OPT_TOPIC,
-    PROD_SIM_TOPIC
+    PROD_SIM_TOPIC,
     CRF_SA_TOPIC,
     SA1_KPIS_TOPIC,
     SA2_MONITORING_TOPIC,
