@@ -1,0 +1,85 @@
+name: CI/CD - Deploy Python Worker
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'python-worker/**'
+  workflow_dispatch:
+
+jobs:
+  deploy-dev:
+    name: Deploy to System Environment
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Copy python-worker files to Dev Deployment
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VM_HOST_IP }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.VM_SSH_KEY }}
+          source: "python-worker/*"
+          target: "/root/modapto/system-deployment/production-knowledge-base/"
+          strip_components: 0
+          overwrite: true
+
+      - name: Rebuild and restart elk-pyworker container
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VM_HOST_IP }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.VM_SSH_KEY }}
+          script: |
+            # Fail script on first error
+            set -e
+
+            # Update Dev Deployment
+            cd /root/modapto/system-deployment
+            docker compose up -d --build elk-pyworker
+
+            # Remove unused images
+            docker image prune -f
+
+            echo "System deployment completed successfully"
+
+  deploy-fft:
+    name: Deploy to FFT Environment
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Copy python-worker files to FFT Deployment
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VM_HOST_IP }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.VM_SSH_KEY }}
+          source: "python-worker/*"
+          target: "/root/modapto/fft-deployment/production-knowledge-base/"
+          strip_components: 0
+          overwrite: true
+
+      - name: Rebuild and restart elk-pyworker-fft container
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VM_HOST_IP }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.VM_SSH_KEY }}
+          script: |
+            # Fail script on first error
+            set -e
+
+            # Navigate to parent directory and rebuild container
+            cd /root/modapto/fft-deployment
+            docker compose up -d --build elk-pyworker-fft
+
+            # Remove unused images
+            docker image prune -f
+
+            echo "FFT deployment completed successfully"
