@@ -77,9 +77,9 @@ PROD_SIM_TOPIC = "production-schedule-simulation"
 PROD_SIM_INDEX = "simulation-sew"
 
 OPT_FFT_CONFIG_INDEX = "optimization-config-fft"
+ROBOT_CONFIG_FFT_INDEX = "optimization-config-fft"
 
-ROBOT_CONFIG_FFT_INDEX = "robot-config-fft"
-
+FFT_OPT_INDEX="optimization-fft"
 
 TOPICS_ALLOWING_NULL_RESULTS = {"modapto-module-deletion"}
 
@@ -280,6 +280,26 @@ THRESHOLD_RESULT_MAPPINGS = {
     }
 }
 
+FFT_OPT_RESULT_MAPPINGS = {
+    "properties": {
+        "uuid": {"type": "keyword"},
+        "timestamp": {"type": "date"},          
+        "moduleName": {"type": "keyword"},      
+        "robotConfiguration": {
+            "type": "object",
+            "dynamic": True                   
+        },
+        "optimizedCodeSrc": {"type": "text"},
+        "optimizedCodeDat": {"type": "text"},
+        "timeLimit": {"type": "long"},
+        "timeDiff": {"type": "float"},
+        "energyDiff": {"type": "float"},
+        "sourceRaw": {
+            "type": "object",
+            "dynamic": True                    
+        },
+    }
+}
 
 
 # Elasticsearch
@@ -1079,6 +1099,71 @@ def handle_crf_picking_sequence_simulation(event):
         logger.debug(f"Payload: {json.dumps(event, indent=2)}")
 
 
+#TOFIX
+
+def handle_fft_robot_movement_optimization(event):
+    """
+    {
+        "uuid": "...",
+        "data": {
+            "optimizedCode_src": "...",
+            "optimizedCode_dat": "...",
+            "time_limit": 26375,
+            "robotConfiguration": {...},
+            "time_difference": -50.416,
+            "energy_difference": -0.055
+        },
+        "produced_at": 1761224311223 
+    }
+    """
+    try:
+        create_index_if_missing(FFT_OPT_INDEX, mappings=FFT_OPT_RESULT_MAPPINGS)
+
+        if not isinstance(event, dict):
+            logger.warning(f"[FFT-OPT] Non-dict event: {type(event)}")
+            return
+
+        payload = event 
+        data = payload.get("data") or {}
+
+        uid = payload.get("uuid") or data.get("uuid")
+
+        produced_at = payload.get("produced_at") or data.get("producedAt")
+        ts = None
+        if produced_at is not None:
+            try:
+                if isinstance(produced_at, (int, float)):
+                    ts = datetime.utcfromtimestamp(produced_at / 1000.0).isoformat() + "Z"
+                elif isinstance(produced_at, str) and produced_at.isdigit():
+                    ts = datetime.utcfromtimestamp(int(produced_at) / 1000.0).isoformat() + "Z"
+                else:
+                    ts = _iso_or_none(produced_at)
+            except Exception:
+                ts = None
+
+        robot_cfg = data.get("robotConfiguration") or payload.get("robotConfiguration") or {}
+        module_name = None
+        if isinstance(robot_cfg, dict):
+            module_name = robot_cfg.get("name") or robot_cfg.get("module_name")
+        doc = {
+            "uuid": uid,
+            "timestamp": ts,
+            "moduleName": module_name,
+            "robotConfiguration": robot_cfg,
+            "optimizedCodeSrc": data.get("optimizedCode_src"),
+            "optimizedCodeDat": data.get("optimizedCode_dat"),
+            "timeLimit": data.get("time_limit"),
+            "timeDiff": data.get("time_difference"),
+            "energyDiff": data.get("energy_difference"),
+            "sourceRaw": payload,
+        }
+
+        logger.info(f"[KAFKA-INP][FFT-OPT] uuid={uid} moduleName={module_name} ts={ts}")
+        es.index(index=FFT_OPT_INDEX, document=doc, refresh="wait_for")
+        logger.info(f"[ES] Indexed FFT robot movement optimization (uuid={uid}) into '{FFT_OPT_INDEX}'")
+    except Exception as e:
+        logger.error(f"Failed to index FFT robot movement optimization: {e}")
+        logger.debug(f"Payload: {json.dumps(event, indent=2)}")
 
 def _case_to_index(case: str) -> str:
     case = (case or "").lower()
@@ -1301,8 +1386,6 @@ def get_robot_config_fft(module_id: Optional[str], module_name: Optional[str] = 
     Returns robotConfiguration
     """
     try:
-        must = [{"term": {"moduleId": module_id}}]
-        query = {"bool": {"must": must}}
 
         resp = es.search(
             index=ROBOT_CONFIG_FFT_INDEX,
@@ -1321,7 +1404,6 @@ def get_robot_config_fft(module_id: Optional[str], module_name: Optional[str] = 
             resp2 = es.search(
                 index=ROBOT_CONFIG_FFT_INDEX,
                 body={
-                    "query": {"term": {"module_name": module_name}},
                     "size": 1,
                     "sort": [
                         {"uploadedAt": {"order": "desc", "unmapped_type": "date"}},
@@ -1343,8 +1425,6 @@ def get_robot_config_fft(module_id: Optional[str], module_name: Optional[str] = 
 
         return {
             "ok": True,
-            "moduleId": module_id,
-            "moduleName": module_name,
             "id": hit.get("_id"),
             "robotConfiguration": robot_cfg,
             "documentMeta": {
@@ -1358,7 +1438,7 @@ def get_robot_config_fft(module_id: Optional[str], module_name: Optional[str] = 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to fetch robot config for '{module_id}': {e}")
+        logger.error(f"Failed to fetch robot config: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch robot configuration")
 
 
@@ -1457,6 +1537,9 @@ def kafka_loop():
                             elif kkey == "kh-picking-sequence-simulation":
                                 logger.info("[MQTT] Routed to kh-picking-sequence-simulation")
                                 handle_crf_picking_sequence_simulation(event)
+                            elif kkey == "robot-movement-opt":
+                                logger.info("[MQTT] Routed to robot-movement-opt")
+                                handle_fft_robot_movement_optimization(event)
                             else:
                                 logger.warning(f"[MQTT] Unknown key '{kkey}' - ignoring")
                         else:
