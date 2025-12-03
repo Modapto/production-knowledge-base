@@ -1537,7 +1537,7 @@ def kafka_loop():
                             elif kkey == "kh-picking-sequence-simulation":
                                 logger.info("[MQTT] Routed to kh-picking-sequence-simulation")
                                 handle_crf_picking_sequence_simulation(event)
-                            elif kkey == "robot-movement-opt":
+                            elif kkey == "robot-movement-optimization":
                                 logger.info("[MQTT] Routed to robot-movement-opt")
                                 handle_fft_robot_movement_optimization(event)
                             else:
