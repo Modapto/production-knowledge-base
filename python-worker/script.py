@@ -869,6 +869,10 @@ def handle_threshold_predictive_maintenance(event):
         module_id = results.get("moduleId") or event.get("module")
         smart_service_id = results.get("smartServiceId") or event.get("smartService")
         rec = results.get("recommendation")
+        cell = results.get("cell")
+        duration = results.get("duration")
+        module_id = results.get("module_id")
+        sub_element_id = results.get("sub_element_id")
         details = results.get("details")
         ts = _iso_or_none(results.get("timestamp") or event.get("timestamp"))
 
@@ -877,6 +881,10 @@ def handle_threshold_predictive_maintenance(event):
             "moduleId":         module_id,
             "smartServiceId":   smart_service_id,
             "recommendation":   rec,
+            "moduleIdentifier": module_id,
+            "cell":             cell,
+            "duration":         duration,
+            "subElementIdentifier":     sub_element_id,
             "details":          details,
             "timestamp":        ts,
             "sourceRaw": {
