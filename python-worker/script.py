@@ -1131,7 +1131,7 @@ def handle_fft_robot_movement_optimization(event):
             logger.warning(f"[FFT-OPT] Non-dict event: {type(event)}")
             return
 
-        payload = event 
+        payload = event.get("results") if isinstance(event, dict) and isinstance(event.get("results"), dict) else event
         data = payload.get("data") or {}
 
         uid = payload.get("uuid") or data.get("uuid")
