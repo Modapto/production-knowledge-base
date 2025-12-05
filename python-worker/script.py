@@ -821,8 +821,6 @@ def handle_production_schedule_simulation(event):
         module_id = payload.get("moduleId") or event.get("module") or event.get("moduleId")
         smart_service_id = payload.get("smartServiceId") or event.get("smartService") or event.get("smartServiceId")
         ts = payload.get("timestamp") or event.get("timestamp")
-        logger.info(f"[ES] {payload}'")
-        
         data = payload.get("data") or {}
         
 
@@ -830,7 +828,7 @@ def handle_production_schedule_simulation(event):
             "moduleId":       module_id,
             "smartServiceId": smart_service_id,
             "timestamp":      ts,
-            "data":           data
+            "data":           payload
         }
 
         logger.info(f"[KAFKA-INP][SEW-SIM] module={module_id} ts={ts}, doc {doc}")
