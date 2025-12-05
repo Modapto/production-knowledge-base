@@ -1158,13 +1158,12 @@ def handle_fft_robot_movement_optimization(event):
 
         es.index(
             index=FFT_OPT_INDEX,
-            id=results.get("id"),
             document=doc,
             refresh="wait_for",
         )
 
         logger.info(
-            f"[ES][FFT-OPT] Indexed FFT optimization (module={module}, id={results.get('id')}) "
+            f"[ES][FFT-OPT] Indexed FFT optimization (module={module}, doc) "
             f"into '{FFT_OPT_INDEX}'"
         )
 
