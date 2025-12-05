@@ -821,7 +821,10 @@ def handle_production_schedule_simulation(event):
         module_id = payload.get("moduleId") or event.get("module") or event.get("moduleId")
         smart_service_id = payload.get("smartServiceId") or event.get("smartService") or event.get("smartServiceId")
         ts = payload.get("timestamp") or event.get("timestamp")
+        logger.info(f"[ES] {payload}'")
+        
         data = payload.get("data") or {}
+        
 
         doc = {
             "moduleId":       module_id,
@@ -1163,7 +1166,7 @@ def handle_fft_robot_movement_optimization(event):
         )
 
         logger.info(
-            f"[ES][FFT-OPT] Indexed FFT optimization (module={module}, doc) "
+            f"[ES][FFT-OPT] Indexed FFT optimization (module={module}, {doc}) "
             f"into '{FFT_OPT_INDEX}'"
         )
 
