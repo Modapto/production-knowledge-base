@@ -280,26 +280,40 @@ THRESHOLD_RESULT_MAPPINGS = {
     }
 }
 
+
 FFT_OPT_RESULT_MAPPINGS = {
     "properties": {
-        "uuid": {"type": "keyword"},
-        "timestamp": {"type": "date"},          
-        "moduleName": {"type": "keyword"},      
-        "robotConfiguration": {
-            "type": "object",
-            "dynamic": True                   
+        "timestamp": {
+            "type": "date"
         },
-        "optimizedCodeSrc": {"type": "text"},
-        "optimizedCodeDat": {"type": "text"},
-        "timeLimit": {"type": "long"},
-        "timeDiff": {"type": "float"},
-        "energyDiff": {"type": "float"},
+        "module": {
+            "type": "keyword"
+        },
+        "optimizedCode_src": {
+            "type": "text"
+        },
+        "optimizedCode_dat": {
+            "type": "text"
+        },
+        "time_limit": {
+            "type": "integer"
+        },
+        "robotConfiguration": {
+            "type": "flattened"   # για να ταιριάζει με FieldType.Flattened
+        },
+        "time_difference": {
+            "type": "double"
+        },
+        "energy_difference": {
+            "type": "double"
+        },
         "sourceRaw": {
             "type": "object",
-            "dynamic": True                    
+            "dynamic": True
         },
     }
 }
+
 
 
 # Elasticsearch
@@ -1107,23 +1121,9 @@ def handle_crf_picking_sequence_simulation(event):
         logger.debug(f"Payload: {json.dumps(event, indent=2)}")
 
 
-#TOFIX
 
 def handle_fft_robot_movement_optimization(event):
-    """
-    {
-        "uuid": "...",
-        "data": {
-            "optimizedCode_src": "...",
-            "optimizedCode_dat": "...",
-            "time_limit": 26375,
-            "robotConfiguration": {...},
-            "time_difference": -50.416,
-            "energy_difference": -0.055
-        },
-        "produced_at": 1761224311223 
-    }
-    """
+    
     try:
         create_index_if_missing(FFT_OPT_INDEX, mappings=FFT_OPT_RESULT_MAPPINGS)
 
@@ -1131,44 +1131,43 @@ def handle_fft_robot_movement_optimization(event):
             logger.warning(f"[FFT-OPT] Non-dict event: {type(event)}")
             return
 
-        payload = event 
-        data = payload.get("data") or {}
+        results = event.get("results") or {}
 
-        uid = payload.get("uuid") or data.get("uuid")
+        data = results.get("data") or {}
+        if isinstance(data, list):
+            data = data[0] if data else {}
 
-        produced_at = payload.get("produced_at") or data.get("producedAt")
-        ts = None
-        if produced_at is not None:
-            try:
-                if isinstance(produced_at, (int, float)):
-                    ts = datetime.utcfromtimestamp(produced_at / 1000.0).isoformat() + "Z"
-                elif isinstance(produced_at, str) and produced_at.isdigit():
-                    ts = datetime.utcfromtimestamp(int(produced_at) / 1000.0).isoformat() + "Z"
-                else:
-                    ts = _iso_or_none(produced_at)
-            except Exception:
-                ts = None
+        if not data and "time_limit" in event:
+            data = event
 
-        robot_cfg = data.get("robotConfiguration") or payload.get("robotConfiguration") or {}
-        module_name = None
-        if isinstance(robot_cfg, dict):
-            module_name = robot_cfg.get("name") or robot_cfg.get("module_name")
+        ts = _iso_or_none(event.get("timestamp"))
+
+        module = event.get("module") or data.get("module")
+
         doc = {
-            "uuid": uid,
             "timestamp": ts,
-            "moduleName": module_name,
-            "robotConfiguration": robot_cfg,
-            "optimizedCodeSrc": data.get("optimizedCode_src"),
-            "optimizedCodeDat": data.get("optimizedCode_dat"),
-            "timeLimit": data.get("time_limit"),
-            "timeDiff": data.get("time_difference"),
-            "energyDiff": data.get("energy_difference"),
-            "sourceRaw": payload,
+            "module": module,
+            "optimizedCode_src": data.get("optimizedCode_src"),
+            "optimizedCode_dat": data.get("optimizedCode_dat"),
+            "time_limit": data.get("time_limit"),
+            "robotConfiguration": data.get("robotConfiguration") or {},
+            "time_difference": data.get("time_difference"),
+            "energy_difference": data.get("energy_difference"),
+            "sourceRaw": event,   
         }
 
-        logger.info(f"[KAFKA-INP][FFT-OPT] uuid={uid} moduleName={module_name} ts={ts}")
-        es.index(index=FFT_OPT_INDEX, document=doc, refresh="wait_for")
-        logger.info(f"[ES] Indexed FFT robot movement optimization (uuid={uid}) into '{FFT_OPT_INDEX}'")
+        es.index(
+            index=FFT_OPT_INDEX,
+            id=results.get("id"),
+            document=doc,
+            refresh="wait_for",
+        )
+
+        logger.info(
+            f"[ES][FFT-OPT] Indexed FFT optimization (module={module}, id={results.get('id')}) "
+            f"into '{FFT_OPT_INDEX}'"
+        )
+
     except Exception as e:
         logger.error(f"Failed to index FFT robot movement optimization: {e}")
         logger.debug(f"Payload: {json.dumps(event, indent=2)}")
