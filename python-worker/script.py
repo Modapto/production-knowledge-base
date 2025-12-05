@@ -1131,7 +1131,7 @@ def handle_fft_robot_movement_optimization(event):
             logger.warning(f"[FFT-OPT] Non-dict event: {type(event)}")
             return
 
-        results = event.get("results") or {}
+        results = event.get("results") or {}      
 
         data = results.get("data") or {}
         if isinstance(data, list):
