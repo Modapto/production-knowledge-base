@@ -52,7 +52,6 @@ THRESHOLD_TOPIC = "threshold-predictive-maintenance"
 THRESHOLD_INDEX = "sew-threshold-predictive-maintenance-results"
 
 MQTT_TOPIC = "modapto-mqtt-topics"
-# to key tou einai to previous topic
 
 PROD_OPT_TOPIC = "production-schedule-optimization"
 PROD_OPT_INDEX = "optimization-sew"
@@ -83,8 +82,10 @@ FFT_OPT_INDEX="optimization-fft"
 
 TOPICS_ALLOWING_NULL_RESULTS = {"modapto-module-deletion"}
 
+PROD_SCHEMA_TOPIC = "production-schema-registration"
+PROD_SCHEMA_INDEX= "production-schema-registration"
 
-# Kafka
+# Kafka Configuration
 KAFKA_BROKER = os.getenv("KAFKA_URL", "kafka:9092")
 TOPICS = [
     "modapto-module-creation",
@@ -93,6 +94,7 @@ TOPICS = [
     "smart-service-assigned",
     "smart-service-unassigned",
     "base64-input-events",
+    PROD_SCHEMA_TOPIC,
     GROUPING_TOPIC,
     THRESHOLD_TOPIC,
     PROD_OPT_TOPIC,
@@ -104,8 +106,7 @@ TOPICS = [
 ]
 TARGET_TOPIC = "aegis-test"
 
-# MAPPINGS
-
+# Elastic MAPPINGS
 TIMEWINDOW_MAPPING = {
     "properties": {
         "begin": {"type": "date"},  
@@ -1003,6 +1004,20 @@ def handle_sa1_kpis_event(event):
         logger.error(f"Failed to index SA1 KPIs: {e}")
         logger.debug(f"Payload: {json.dumps(event, indent=2)}")
 
+def handle_production_schema_registration_event(event):
+    try:
+        create_index_if_missing(PROD_SCHEMA_INDEX) 
+
+        es.index(index=PROD_SCHEMA_INDEX, document=event, refresh="wait_for")
+
+        logger.info(f"[ES] Indexed raw production schema event into '{PROD_SCHEMA_INDEX}'")
+    except Exception as e:
+        logger.error(f"Failed to index production schema registration: {e}")
+        logger.debug(f"Payload: {json.dumps(event, indent=2)}")
+
+
+
+    
 def handle_sa2_monitoring_event(event):
 
     try:
@@ -1531,6 +1546,9 @@ def kafka_loop():
                         elif topic == SA2_MONITORING_TOPIC:
                             logger.info("Handling SEW SA2 real-time monitoring...")
                             handle_sa2_monitoring_event(event)
+                        elif topic == PROD_SCHEMA_TOPIC:
+                            logger.info("Handling Production Schema registration...")
+                            handle_production_schema_registration_event(event)    
                         elif topic == MQTT_TOPIC:
                             if kkey == "production-schedule-optimization":
                                 logger.info("[MQTT] Routed to production-schedule-optimization")
