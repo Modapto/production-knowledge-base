@@ -1196,7 +1196,7 @@ def handle_policy_registration_event(event):
         logger.debug(f"Payload: {json.dumps(event, indent=2)}")
 
 
-  def handle_sa2_monitoring_event(event):
+def handle_sa2_monitoring_event(event):
     try:
         create_index_if_missing(SA2_MONITORING_INDEX, mappings=SA2_MONITORING_MAPPINGS)
 
