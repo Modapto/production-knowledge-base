@@ -10,6 +10,7 @@ from typing import Literal, Optional
 from datetime import datetime
 import re
 import uuid
+from datetime import timedelta
 
 try:
     from kafka import KafkaConsumer, KafkaProducer
@@ -38,6 +39,150 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)],
 )
 logger = logging.getLogger("modapto-worker")
+
+# ---------------------------------
+# POLICIES
+# ---------------------------------
+
+# ---------------------------------
+# POLICIES
+# ---------------------------------
+
+USAGE_POLICIES_INDEX = os.getenv("USAGE_POLICIES_INDEX", "usage-policies")
+ACCESS_AUDIT_INDEX = os.getenv("ACCESS_AUDIT_INDEX", "access-audit")
+
+def load_active_policies(es_client):
+    """
+    Loads active usage policies from Elasticsearch.
+    """
+    query = {"query": {"term": {"status": "active"}}}
+    res = es_client.search(index=USAGE_POLICIES_INDEX, body=query, size=200)
+    return [hit["_source"] for hit in res.get("hits", {}).get("hits", [])]
+
+def _wildcard_to_regex(pattern: str) -> str:
+    # convert "optimization-*" -> r"^optimization-.*$"
+    pattern = pattern or "*"
+    escaped = re.escape(pattern).replace(r"\*", ".*")
+    return f"^{escaped}$"
+
+def match_policy(policies, user_ctx, resource_name, action):
+    """
+    Finds the first applicable policy.
+    Matching rules:
+      - policy.permissions.action == action
+      - resource.name wildcard matches resource_name (index name)
+      - subject matches either partner or role
+    """
+    for policy in policies:
+        try:
+            if policy.get("permissions", {}).get("action") != action:
+                continue
+
+            resource_pat = policy.get("resource", {}).get("name", "*")
+            if not re.match(_wildcard_to_regex(resource_pat), resource_name or ""):
+                continue
+
+            subject = policy.get("subject", {})
+            stype = subject.get("type")
+            sid = subject.get("id")
+
+            if stype == "partner" and sid != user_ctx.get("partner"):
+                continue
+            if stype == "role" and sid != user_ctx.get("role"):
+                continue
+
+            return policy
+        except Exception:
+            # If a policy doc is malformed, skip it (do not break ingestion)
+            continue
+
+    return None
+
+def enforce_policy(policy, user_ctx, payload: dict):
+    """
+    Enforces constraints and returns (decision, enforced_constraints_list).
+    NOTE: payload can be mutated (e.g., masking fields).
+    """
+    enforced = []
+
+    constraints = policy.get("constraints", {}) or {}
+    enforcement = policy.get("enforcement", {}) or {}
+
+    # PURPOSE constraint
+    allowed_purposes = constraints.get("purpose")
+    if allowed_purposes:
+        if user_ctx.get("purpose") not in allowed_purposes:
+            return "deny", enforced
+
+    # Aggregation-only / masking example
+    if enforcement.get("mask_fields"):
+        for f in enforcement["mask_fields"]:
+            if f in payload:
+                payload.pop(f, None)
+                enforced.append(f"masked:{f}")
+
+    if enforcement.get("allow_aggregations_only"):
+        if "rawSensorData" in payload:
+            payload.pop("rawSensorData", None)
+            enforced.append("aggregation_only")
+
+    # TTL metadata (does not delete data by itself—just marks expiry time)
+    ttl_days = constraints.get("time_to_live_days")
+    if ttl_days:
+        payload["_ttl_expires"] = (datetime.utcnow() + timedelta(days=int(ttl_days))).isoformat()
+        enforced.append("ttl_applied")
+
+    # no_redistribution is a usage constraint (document it + audit it)
+    if constraints.get("no_redistribution") is True:
+        payload["_usage_no_redistribution"] = True
+        enforced.append("no_redistribution")
+
+    return "allow", enforced
+
+def log_audit(es_client, user_ctx, resource, action, policy, decision, enforced):
+    """
+    Writes audit evidence to access-audit index.
+    """
+    audit_doc = {
+        "@timestamp": datetime.utcnow().isoformat(),
+        "user": user_ctx.get("id"),
+        "partner": user_ctx.get("partner"),
+        "role": user_ctx.get("role"),
+        "purpose": user_ctx.get("purpose"),
+        "resource": resource,
+        "action": action,
+        "policyId": policy.get("policyId") if policy else None,
+        "decision": decision,
+        "enforcedConstraints": enforced,
+    }
+    try:
+        es_client.index(index=ACCESS_AUDIT_INDEX, document=audit_doc)
+    except Exception as e:
+        logger.warning(f"[AUDIT] Failed to write audit log: {e}")
+
+def policy_gate(es_client, target_index_name: str, event: dict, action: str = "write"):
+    """
+    Policy Enforcement Point (PEP) at integration layer.
+    Returns: (allowed: bool, enforced: list, policy: dict|None, event: dict)
+    """
+    user_ctx = {
+        "id": event.get("userId") or event.get("user") or "unknown",
+        "partner": event.get("partner") or "internal",
+        "role": event.get("role") or "internal",
+        "purpose": event.get("purpose") or "monitoring",
+    }
+
+    policies = load_active_policies(es_client)
+    policy = match_policy(policies, user_ctx, target_index_name, action)
+
+    if not policy:
+        log_audit(es_client, user_ctx, target_index_name, action, None, "deny", [])
+        return False, [], None, event
+
+    decision, enforced = enforce_policy(policy, user_ctx, event)
+    log_audit(es_client, user_ctx, target_index_name, action, policy, decision, enforced)
+
+    return decision == "allow", enforced, policy, event
 
 # ---------------------------------
 # Config / Env
@@ -527,8 +672,18 @@ def _normalize_sa2_item(item: dict) -> dict:
 
 
 def _iso_or_none(ts):
-
-    return ts if ts else None
+    """
+    Accepts:
+      - ISO string
+      - list of ISO strings (Kafka UI συχνά δείχνει timestamp ως array)
+    Returns:
+      - first ISO string or None
+    """
+    if not ts:
+        return None
+    if isinstance(ts, list):
+        return ts[0] if ts else None
+    return ts
 
 
 def _extract_robot_config(src: dict) -> dict:
@@ -1008,6 +1163,12 @@ def handle_production_schema_registration_event(event):
     try:
         create_index_if_missing(PROD_SCHEMA_INDEX) 
 
+# allowed, enforced, policy, event = policy_gate(
+#             es, PROD_SCHEMA_INDEX, event, action="write"
+#         )
+#         if not allowed:
+#             logger.warning("[POLICY] Denied schema registration ingestion")
+#             return
         es.index(index=PROD_SCHEMA_INDEX, document=event, refresh="wait_for")
 
         logger.info(f"[ES] Indexed raw production schema event into '{PROD_SCHEMA_INDEX}'")
@@ -1017,35 +1178,70 @@ def handle_production_schema_registration_event(event):
 
 
 
-    
-def handle_sa2_monitoring_event(event):
+def handle_policy_registration_event(event):
+    try:
+        create_index_if_missing(index_example) 
 
+        allowed, enforced, policy, event = policy_gate(
+            es, PROD_SCHEMA_INDEX, event, action="write"
+        )
+        if not allowed:
+            logger.warning("[POLICY] Denied registration ingestion")
+            return
+        es.index(index=index_example, document=event, refresh="wait_for")
+
+        logger.info(f"[ES] Indexed raw production schema event into '{index_example}'")
+    except Exception as e:
+        logger.error(f"Failed to index production schema registration: {e}")
+        logger.debug(f"Payload: {json.dumps(event, indent=2)}")
+
+
+  def handle_sa2_monitoring_event(event):
     try:
         create_index_if_missing(SA2_MONITORING_INDEX, mappings=SA2_MONITORING_MAPPINGS)
 
-        # Συγκέντρωση records από πιθανά wrappers
-        if isinstance(event, dict):
-            if isinstance(event.get("results"), list):
-                records = event["results"]
-            elif isinstance(event.get("data"), list):
-                records = event["data"]
-            else:
-                records = [event]
-        else:
-            logger.warning("[SA2] Unsupported event format")
+        if not isinstance(event, dict):
+            logger.warning("[SA2] Unsupported event format (non-dict)")
             return
+
+        # --- Extract top-level metadata (wrapper style όπως στο screenshot) ---
+        top_module_id = event.get("module") or event.get("moduleId")
+        top_smart_service_id = event.get("smartService") or event.get("smartServiceId")
+        top_ts = _iso_or_none(event.get("timestamp"))
+
+        # --- Collect records from wrappers ---
+        records = []
+        res = event.get("results")
+
+        if isinstance(res, list):
+            records = res
+        elif isinstance(res, dict):
+            records = [res]
+        elif isinstance(event.get("data"), list):
+            records = event["data"]
+        else:
+            # fallback: treat the event itself as a record
+            records = [event]
 
         indexed = 0
         for rec in records:
             nr = _normalize_sa2_item(rec)
 
+            # Prefer top-level identifiers, fallback to record-level if present
+            module_id = top_module_id or nr.get("moduleId")
+            smart_service_id = top_smart_service_id or nr.get("smartServiceId")
+
+            # timestamp can exist either in top-level wrapper or in the record
+            ts = top_ts or nr.get("timestamp")
+
+            # In screenshot: results.module = "A22" (module name), top-level module = UUID (moduleId)
             doc = {
-                "timestamp": nr.get("timestamp"),
-                "moduleId": nr.get("moduleId"),
-                "module": nr.get("module"),
-                "component": nr.get("component"),
-                "property": nr.get("property"),
-                "value": nr.get("value"),
+                "timestamp": ts,
+                "moduleId": module_id,
+                "module": nr.get("module"),                 # e.g. "A22"
+                "component": nr.get("component"),           # e.g. "Var_A22"
+                "property": nr.get("property"),             # e.g. "IActualCurrent"
+                "value": nr.get("value"),                   # keep as string (mapping expects keyword)
                 "lowThreshold": nr.get("lowThreshold"),
                 "highThreshold": nr.get("highThreshold"),
                 "deviationPercentage": nr.get("deviationPercentage"),
@@ -1054,10 +1250,16 @@ def handle_sa2_monitoring_event(event):
             es.index(index=SA2_MONITORING_INDEX, document=doc, refresh="wait_for")
             indexed += 1
 
-        logger.info(f"[ES] Indexed {indexed} SA2 monitoring record(s) '{doc}' into '{SA2_MONITORING_INDEX}'")
+        logger.info(f"[ES] Indexed {indexed} SA2 monitoring record(s) into '{SA2_MONITORING_INDEX}'")
+
     except Exception as e:
         logger.error(f"Failed to index SA2 monitoring results: {e}")
-        logger.debug(f"Payload: {json.dumps(event, indent=2)}")
+        try:
+            logger.debug(f"Payload: {json.dumps(event, indent=2)}")
+        except Exception:
+            pass
+
+
 
 
 def _first_present(*vals):
